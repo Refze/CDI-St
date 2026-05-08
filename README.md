@@ -250,31 +250,6 @@ cdi-st/
 
 ---
 
-## Development
-
-Clone and install in editable mode:
-
-```bash
-git clone https://github.com/Refze/CDI-St.git
-cd CDI-St
-pip install -e ".[dev]"
-cdi-st  # launch
-```
-
-Run tests:
-
-```bash
-pytest
-```
-
-Lint:
-
-```bash
-ruff check src/
-```
-
----
-
 ## Citing
 
 If you use CDI-ST in published research, please cite:
