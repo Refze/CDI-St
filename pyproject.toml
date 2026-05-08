@@ -3,7 +3,7 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cdi-st"
+name = "cdi-stools"
 version = "0.1.0"
 description = "Coherent Diffraction Imaging Simulation Tools — BCDI simulation and NN-based phase retrieval"
 readme = "README.md"
@@ -83,6 +83,7 @@ Changelog = "https://github.com/Refze/CDI-St/blob/main/CHANGELOG.md"
 # Console command: typing `cdi-st` in the terminal launches the GUI
 [project.scripts]
 cdi-st = "cdi_st.bcdi_gui:main"
+cdi-stools = "cdi_st.bcdi_gui:main"
 
 # ── Hatchling build configuration ───────────────────────────────────────────
 # Tell Hatchling where the source lives and which non-Python files to include.
