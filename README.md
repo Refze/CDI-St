@@ -52,9 +52,9 @@ pip install "cdi-st[all]"
 ## What is BCDI?
 
 Bragg Coherent Diffraction Imaging is a synchrotron technique that reconstructs the
-3D shape and atomic-displacement field of nanocrystals, by inverting the diffraction
+3D shape and atomic-displacement field of nanocrystals by inverting the diffraction
 intensity around a Bragg peak. The intensity gives only |F(q)|², so reconstruction
-must recover the missing phase — historically by iterative algorithms (HIO, RAAR, ER),
+must recover the missing phase by iterative algorithms (HIO, RAAR, ER),
 more recently by neural networks.
 
 **CDI-ST integrates the entire workflow into one tool:**
@@ -128,9 +128,8 @@ intensity. You control:
 - **Grid size** (64³ recommended for training, 128³ for production inference)
 - **Materials** (random or fixed)
 - **Particle size variation** (random supercell multiplier)
-- **Random dislocations** toggle — adds occasional edge/screw/mixed dislocations
-- **Random strain** toggle — adds occasional radial/edge/random strain fields
-- **Noise injection** — Poisson + readout noise on ~30% of samples
+- **Random dislocations** adds occasional edge/screw/mixed dislocations
+- **Random strain** adds occasional radial/edge/random strain fields
 
 Samples save as `sample_XXXXX.npz` and a `manifest.json`. Generation is
 parallelizable and resumable.
@@ -141,7 +140,8 @@ AutoPhase_NN is a 3D dual-decoder convolutional network that learns to invert th
 Fourier modulus constraint **without ground truth**. It predicts the object's
 amplitude and phase such that `|FFT(amp · exp(iφ))|` matches the measured
 magnitude. The loss is a normalized-magnitude error plus optional regularizers
-on phase smoothness and support compactness.
+on phase smoothness and support compactness. This is the network from (Yao, Yudong, 
+et al. npj Computational Materials 8.1 (2022) ) reimplemented for this codebase.
 
 Training is GPU-accelerated (CUDA preferred) and converges in a few dozen
 epochs on 2,000+ samples. The best checkpoint is saved automatically.
@@ -149,8 +149,7 @@ epochs on 2,000+ samples. The best checkpoint is saved automatically.
 ### 6. CDI_NN — supervised PhaseUNet3D
 
 A 3D U-Net that predicts the phase field from the diffraction magnitude, trained
-against the ground-truth phase from the data generator. This is the network from
-Yao et al. (2022) reimplemented for this codebase.
+against the ground-truth phase from the data generator.
 
 Use AutoPhase_NN when you don't trust your simulator's ground truth (or have
 none). Use CDI_NN when you have a high-fidelity simulator and want a direct
@@ -275,13 +274,13 @@ MIT — see [LICENSE](LICENSE).
 
 **Soufiane SAIDI** — saidisoufiane@hotmail.com
 
-Use the in-app **Reports & Suggestions** button to send feedback directly.
+We heavily encourage you to use the in-app **Reports & Suggestions** button to send any type of feedback.
 
 ---
 
 ## Acknowledgments
 
-Built on the shoulders of the BCDI community:
+Built on the shoulders of the BCDI and python community:
 [PyNX](https://pynx.esrf.fr/), [BCDI-Utilities](https://github.com/carnisj/bcdi),
 [cdiutils](https://github.com/clatlan/cdiutils), [xrayutilities](https://xrayutilities.sourceforge.io/),
 [scikit-image](https://scikit-image.org/), [PyQt6](https://www.riverbankcomputing.com/software/pyqt/),
