@@ -65,6 +65,9 @@ For everything:
 pip install "cdi-stools[all]"
 ```
 
+Support for other beamlines filenames comming in future updates...
+
+
 > **Note**: `cdi-st` ships a Qt-based GUI. On Linux, you may need system Qt
 > dependencies (`sudo apt install libxcb-cursor0 libxkbcommon-x11-0` on Ubuntu/Debian).
 > On Windows and macOS the wheel includes everything.
