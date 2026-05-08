@@ -65,7 +65,7 @@ For everything:
 pip install "cdi-stools[all]"
 ```
 
-Support for other beamlines filenames comming in future updates...
+Support for other beamlines filenames coming in future updates...
 
 
 > **Note**: `cdi-st` ships a Qt-based GUI. On Linux, you may need system Qt
