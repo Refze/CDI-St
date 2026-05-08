@@ -74,11 +74,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Refze/CDI-Stools"
-Documentation = "https://github.com/Refze/CDI-Stools#readme"
-Repository = "https://github.com/Refze/CDI-Stools"
-Issues = "https://github.com/Refze/CDI-Stools/issues"
-Changelog = "https://github.com/Refze/CDI-Stools/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Refze/CDI-St"
+Documentation = "https://github.com/Refze/CDI-St#readme"
+Repository = "https://github.com/Refze/CDI-St"
+Issues = "https://github.com/Refze/CDI-St/issues"
+Changelog = "https://github.com/Refze/CDI-St/blob/main/CHANGELOG.md"
 
 # Console command: typing `cdi-st` in the terminal launches the GUI
 [project.scripts]
