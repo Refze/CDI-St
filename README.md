@@ -53,19 +53,7 @@ After installation, launch the GUI from any terminal:
 cdi-st or cdi-stools
 ```
 
-For ID01 / synchrotron `.spec` + `.edf` data support:
-
-```bash
-pip install "cdi-stools[id01]"
-```
-
-For everything:
-
-```bash
-pip install "cdi-stools[all]"
-```
-
-Support for other beamlines filenames coming in future updates...
+**Support for other beamlines files is coming in future updates...**
 
 
 > **Note**: `cdi-st` ships a Qt-based GUI. On Linux, you may need system Qt
