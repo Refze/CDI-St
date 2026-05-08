@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/cdi-st
+      url: https://test.pypi.org/p/cdi-stools
     permissions:
       id-token: write
     steps:
