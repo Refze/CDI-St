@@ -10,8 +10,8 @@ A Python application for end-to-end Bragg Coherent Diffraction Imaging (BCDI):
 crystal lattice construction, X-ray scattering simulation, neural-network phase retrieval,
 and 3D visualization, in a single GUI.
 
-[![PyPI version](https://img.shields.io/pypi/v/cdi-st.svg)](https://pypi.org/project/cdi-st/)
-[![Python](https://img.shields.io/pypi/pyversions/cdi-st.svg)](https://pypi.org/project/cdi-st/)
+[![PyPI version](https://img.shields.io/pypi/v/cdi-stools.svg)](https://pypi.org/project/cdi-stools/)
+[![Python](https://img.shields.io/pypi/pyversions/cdi-stools.svg)](https://pypi.org/project/cdi-stools/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
@@ -44,25 +44,25 @@ and 3D visualization, in a single GUI.
 ## Installation
 
 ```bash
-pip install cdi-st
+pip install cdi-stools
 ```
 
 After installation, launch the GUI from any terminal:
 
 ```bash
-cdi-st
+cdi-st or cdi-stools
 ```
 
 For ID01 / synchrotron `.spec` + `.edf` data support:
 
 ```bash
-pip install "cdi-st[id01]"
+pip install "cdi-stools[id01]"
 ```
 
 For everything:
 
 ```bash
-pip install "cdi-st[all]"
+pip install "cdi-stools[all]"
 ```
 
 > **Note**: `cdi-st` ships a Qt-based GUI. On Linux, you may need system Qt
