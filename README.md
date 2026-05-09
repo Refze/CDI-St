@@ -6,7 +6,7 @@
 
 **Coherent Diffraction Imaging — Simulation Tools**
 
-A Python application for end-to-end Bragg Coherent Diffraction Imaging (BCDI):
+An end-to-end Bragg Coherent Diffraction Imaging (BCDI) Python application using low computational resources with an easy to learn GUI:
 crystal lattice construction, X-ray scattering simulation, neural-network phase retrieval,
 and 3D visualization, in a single GUI.
 
