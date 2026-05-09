@@ -110,7 +110,7 @@ The Beam tab also lets you set:
 - **Beam energy** (and the resulting wavelength)
 - **Detector geometry**: pixel pitch, sample-to-detector distance, detector size
 - **Beam size** in microns
-- **Detector preset**: Maxipix (516×516), Eiger 2M, custom rectangular
+- **Detector preset**: Maxipix (516×516), Eiger 2M...etc, custom rectangular
 
 Detector preset auto-fills the geometry parameters.
 
@@ -173,7 +173,7 @@ mapping. Use both via the **ensemble** mode in the Reconstruction tab.
 Load any `.npz` (simulated) or `.h5` (experimental) BCDI file, or convert a
 SPEC + EDF scan from ID01 directly via the dialog. Choose:
 
-- **NN-only**: forward pass, twin-image suppression, COM centering
+- **NN-only (Autophase_NN)**: forward pass, twin-image suppression, COM centering
 - **Refined**: NN seed → HIO + RAAR + ER iterative phase retrieval
 - **Ensemble**: AutoPhase_NN + CDI_NN combined, optionally refined
 - **Compare**: runs both modes side-by-side
