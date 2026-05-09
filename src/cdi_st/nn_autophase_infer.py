@@ -35,27 +35,30 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, time
+
+import argparse
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List
+
 import numpy as np
 import torch
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional, List
 
 from .nn_autophase_model import AutoPhaseNet3D
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Result container
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class AutoPhaseResult:
-    object_3d: np.ndarray          # complex, [N,N,N]
-    amplitude: np.ndarray          # |ρ|, [N,N,N]
-    phase: np.ndarray              # φ ∈ [-π, π], [N,N,N]
-    support: np.ndarray            # dynamic support from amplitude threshold
-    error_metric: List[float]      # R-factor (or χ² per AutoPhaseNN)
+    object_3d: np.ndarray  # complex, [N,N,N]
+    amplitude: np.ndarray  # |ρ|, [N,N,N]
+    phase: np.ndarray  # φ ∈ [-π, π], [N,N,N]
+    support: np.ndarray  # dynamic support from amplitude threshold
+    error_metric: List[float]  # R-factor (or χ² per AutoPhaseNN)
     method: str
     elapsed_seconds: float
 
@@ -64,8 +67,8 @@ class AutoPhaseResult:
 # Data loading (supports both .npz and .h5)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_input(path: str, target_size: int = 64,
-                apply_gap_mask: bool = True) -> tuple:
+
+def load_input(path: str, target_size: int = 64, apply_gap_mask: bool = True) -> tuple:
     """
     Load a diffraction volume from .npz or .h5.
 
@@ -80,22 +83,24 @@ def load_input(path: str, target_size: int = 64,
     """
     p = Path(path)
 
-    if p.suffix == '.npz':
+    if p.suffix == ".npz":
         data = np.load(p)
-        if 'diffraction' in data:
-            diff = data['diffraction'].astype(np.float32)
-        elif 'diffraction_volume' in data:
-            diff = data['diffraction_volume'].astype(np.float32)
-        elif 'amplitude' in data:
-            diff = (data['amplitude'].astype(np.float32)) ** 2
+        if "diffraction" in data:
+            diff = data["diffraction"].astype(np.float32)
+        elif "diffraction_volume" in data:
+            diff = data["diffraction_volume"].astype(np.float32)
+        elif "amplitude" in data:
+            diff = (data["amplitude"].astype(np.float32)) ** 2
         else:
-            raise KeyError(f"No diffraction data in {path}. Keys found: {list(data.keys())}")
+            raise KeyError(
+                f"No diffraction data in {path}. Keys found: {list(data.keys())}"
+            )
 
         truth = None
-        if 'phase_true' in data and 'support' in data:
+        if "phase_true" in data and "support" in data:
             truth = {
-                'phase_true': data['phase_true'],
-                'support': data['support'],
+                "phase_true": data["phase_true"],
+                "support": data["support"],
             }
 
         # If this looks like experimental data (no ground truth), check
@@ -104,23 +109,27 @@ def load_input(path: str, target_size: int = 64,
         if apply_gap_mask and truth is None:
             try:
                 from cdi_st.nn_experimental_loader import mask_detector_gaps
+
                 before_zero_frac = float((diff <= 0).mean())
-                diff = mask_detector_gaps(diff, detector='auto')
+                diff = mask_detector_gaps(diff, detector="auto")
                 after_zero_frac = float((diff <= 0).mean())
                 if before_zero_frac - after_zero_frac > 0.001:
-                    print(f"[load_input] Filled detector gaps "
-                          f"({100*(before_zero_frac - after_zero_frac):.1f}% of voxels)")
+                    print(
+                        f"[load_input] Filled detector gaps "
+                        f"({100*(before_zero_frac - after_zero_frac):.1f}% of voxels)"
+                    )
             except Exception as e:
                 print(f"[load_input] Gap masking skipped: {e}")
 
         # Voxel pitch in nm if recorded
         voxel_nm = None
-        if 'voxel_size_nm' in data:
-            voxel_nm = np.asarray(data['voxel_size_nm'], dtype=np.float32)
+        if "voxel_size_nm" in data:
+            voxel_nm = np.asarray(data["voxel_size_nm"], dtype=np.float32)
         return diff, truth, voxel_nm
 
-    elif p.suffix == '.h5':
+    elif p.suffix == ".h5":
         from cdi_st.nn_experimental_loader import load_h5_diffraction
+
         diff = load_h5_diffraction(path, target_size=target_size)
         return diff, None, None
 
@@ -132,6 +141,7 @@ def load_input(path: str, target_size: int = 64,
 # NN-only inference
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def nn_only_infer(
     diffraction: np.ndarray,
     model_path: str,
@@ -139,7 +149,7 @@ def nn_only_infer(
     device: str = None,
     enforce_oversampling: bool = True,
     support_threshold: float = 0.05,
-    support_method: str = 'percentile',
+    support_method: str = "percentile",
 ) -> AutoPhaseResult:
     """
     Run the trained AutoPhaseNet3D in pure prediction mode (no refinement).
@@ -158,13 +168,14 @@ def nn_only_infer(
                        Original behavior, can clip cubes/hexagons.
     """
     t0 = time.time()
-    device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Load model
-    model = AutoPhaseNet3D(base_channels=base_channels,
-                            enforce_oversampling=enforce_oversampling).to(device)
-    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
+    model = AutoPhaseNet3D(
+        base_channels=base_channels, enforce_oversampling=enforce_oversampling
+    ).to(device)
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     # Preprocess input (matches training preprocessing)
@@ -181,22 +192,26 @@ def nn_only_infer(
     # learned features are spatially miscalibrated and produces garbage with
     # an empty center (the dreaded "cross artifact").
     N_input = diffraction.shape[0]
-    expected_N = ckpt.get('grid_size', None)
+    expected_N = ckpt.get("grid_size", None)
     if expected_N is None:
         # Old checkpoint without metadata. The network is fully convolutional
         # and CAN run at any grid size, but the zero-pad layer is calibrated
         # for the training grid (object in central N/2). Only warn if the
         # input is much larger than 64 (the most common training size).
         if N_input > 96:
-            print(f"[nn_only] Note: input grid is {N_input}\u00b3 but this checkpoint "
-                  f"has no grid_size metadata. If trained at 64\u00b3, the central-N/2 "
-                  f"zero-pad layer expects the object to fit in voxels {N_input//4}-"
-                  f"{3*N_input//4} of each axis. If you see twin/cross artifacts, "
-                  f"retrain or downsample input to the training grid.")
+            print(
+                f"[nn_only] Note: input grid is {N_input}\u00b3 but this checkpoint "
+                f"has no grid_size metadata. If trained at 64\u00b3, the central-N/2 "
+                f"zero-pad layer expects the object to fit in voxels {N_input//4}-"
+                f"{3*N_input//4} of each axis. If you see twin/cross artifacts, "
+                f"retrain or downsample input to the training grid."
+            )
     elif expected_N != N_input:
-        print(f"[nn_only] WARNING: grid size mismatch! Model trained at {expected_N}\u00b3, "
-              f"input is {N_input}\u00b3. The GUI auto-resamples to fix this — "
-              f"if you're calling nn_only_infer directly, downsample first.")
+        print(
+            f"[nn_only] WARNING: grid size mismatch! Model trained at {expected_N}\u00b3, "
+            f"input is {N_input}\u00b3. The GUI auto-resamples to fix this — "
+            f"if you're calling nn_only_infer directly, downsample first."
+        )
 
     x = torch.from_numpy(log_mag[None, None]).float().to(device)
 
@@ -217,7 +232,9 @@ def nn_only_infer(
     # Standard BCDI fix: identify the object hemisphere by total amplitude and
     # zero out the other half. Then center the surviving object.
     try:
-        from scipy.ndimage import center_of_mass, shift as nd_shift, label
+        from scipy.ndimage import center_of_mass, label
+        from scipy.ndimage import shift as nd_shift
+
         N = amp.shape[0]
         amp_max = max(amp.max(), 1e-12)
 
@@ -230,20 +247,27 @@ def nn_only_infer(
                 # Multiple blobs detected — likely twin image
                 blob_amplitudes = []
                 for blob_id in range(1, n_blobs + 1):
-                    mask = (labels == blob_id)
-                    blob_amplitudes.append((mask.sum() * float(amp[mask].mean()), blob_id))
+                    mask = labels == blob_id
+                    blob_amplitudes.append(
+                        (mask.sum() * float(amp[mask].mean()), blob_id)
+                    )
                 blob_amplitudes.sort(reverse=True)
                 # Keep only the top blob
                 kept_id = blob_amplitudes[0][1]
                 kept_mask = (labels == kept_id).astype(np.float32)
                 # Soft mask: erode then dilate to keep some neighborhood
                 from scipy.ndimage import binary_dilation
-                kept_mask = binary_dilation(kept_mask > 0.5, iterations=2).astype(np.float32)
+
+                kept_mask = binary_dilation(kept_mask > 0.5, iterations=2).astype(
+                    np.float32
+                )
                 amp = amp * kept_mask
                 # Phase outside kept region: zero (will get filtered by support later)
                 phase = phase * kept_mask
-                print(f"[nn_only] Twin-image suppression: kept 1 of {n_blobs} blobs "
-                      f"(removed {n_blobs - 1} centro-symmetric or noise blobs)")
+                print(
+                    f"[nn_only] Twin-image suppression: kept 1 of {n_blobs} blobs "
+                    f"(removed {n_blobs - 1} centro-symmetric or noise blobs)"
+                )
 
         # ── Now shift the surviving object to grid center ────────────────
         sup_for_com = (amp > 0.10 * max(amp.max(), 1e-12)).astype(np.float32)
@@ -252,12 +276,14 @@ def nn_only_infer(
             target = np.array(amp.shape) / 2.0
             shift_vec = target - com
             if np.linalg.norm(shift_vec) > 1.0:
-                amp = nd_shift(amp, shift_vec, order=1, mode='constant', cval=0)
+                amp = nd_shift(amp, shift_vec, order=1, mode="constant", cval=0)
                 cplx = np.exp(1j * phase) * (amp > 0).astype(np.float32)
-                cplx_real = nd_shift(cplx.real, shift_vec, order=1,
-                                      mode='constant', cval=0)
-                cplx_imag = nd_shift(cplx.imag, shift_vec, order=1,
-                                      mode='constant', cval=0)
+                cplx_real = nd_shift(
+                    cplx.real, shift_vec, order=1, mode="constant", cval=0
+                )
+                cplx_imag = nd_shift(
+                    cplx.imag, shift_vec, order=1, mode="constant", cval=0
+                )
                 phase = np.angle(cplx_real + 1j * cplx_imag)
     except ImportError:
         pass
@@ -265,12 +291,13 @@ def nn_only_infer(
     # ── Build support ────────────────────────────────────────────────────
     n_total = amp.size
 
-    if support_method == 'percentile':
+    if support_method == "percentile":
         # Estimate the target support size from the autocorrelation of measured
         # diffraction. Use multiple AC thresholds and pick the one giving the
         # most plausible object size.
-        auto_corr = np.abs(np.fft.fftshift(np.fft.ifftn(
-            np.fft.ifftshift(magnitude ** 2))))
+        auto_corr = np.abs(
+            np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(magnitude**2)))
+        )
         ac_max = max(auto_corr.max(), 1e-12)
 
         # Find AC volume at multiple thresholds and average — robust estimate
@@ -290,11 +317,11 @@ def nn_only_infer(
         # Keep top target_n voxels of the NN amplitude
         amp_sorted = np.sort(amp.ravel())[::-1]
         threshold_value = amp_sorted[min(target_n, len(amp_sorted) - 1)]
-        support_raw = (amp >= threshold_value)
+        support_raw = amp >= threshold_value
     else:
         # Classic threshold method (legacy)
         amp_max = max(amp.max(), 1e-12)
-        support_raw = (amp > support_threshold * amp_max)
+        support_raw = amp > support_threshold * amp_max
         # Cap at 15% (was 25% — too loose)
         if support_raw.sum() > n_total * 0.15:
             n_keep = int(n_total * 0.15)
@@ -304,6 +331,7 @@ def nn_only_infer(
     # Morphological cleanup
     try:
         from scipy.ndimage import binary_closing, binary_dilation, binary_opening
+
         # Closing fills small gaps inside (good for cubes)
         support = binary_closing(support_raw, iterations=2)
         # Opening removes isolated noise voxels
@@ -340,8 +368,12 @@ def nn_only_infer(
 
     # Use normalized R as the primary metric (more meaningful)
     return AutoPhaseResult(
-        object_3d=obj, amplitude=amp, phase=phase, support=support,
-        error_metric=[r_norm], method='nn_only',
+        object_3d=obj,
+        amplitude=amp,
+        phase=phase,
+        support=support,
+        error_metric=[r_norm],
+        method="nn_only",
         elapsed_seconds=time.time() - t0,
     )
 
@@ -349,6 +381,7 @@ def nn_only_infer(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Hybrid refinement (NN + RAAR + ER from your existing module)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _center_object(obj_3d, amp, phase, support, voxel_threshold=0.10):
     """
@@ -361,10 +394,11 @@ def _center_object(obj_3d, amp, phase, support, voxel_threshold=0.10):
 
     Returns the shifted (object_3d, amplitude, phase, support).
     """
-    from scipy.ndimage import center_of_mass, shift as nd_shift
     import numpy as _np
+    from scipy.ndimage import center_of_mass
+    from scipy.ndimage import shift as nd_shift
 
-    sup_mask = (support > 0.5)
+    sup_mask = support > 0.5
     if sup_mask.sum() < 10:
         return obj_3d, amp, phase, support
 
@@ -382,17 +416,23 @@ def _center_object(obj_3d, amp, phase, support, voxel_threshold=0.10):
         return obj_3d, amp, phase, support
 
     # Shift complex object using its real and imaginary parts
-    obj_real = nd_shift(obj_3d.real, shift_vec, order=1, mode='constant', cval=0)
-    obj_imag = nd_shift(obj_3d.imag, shift_vec, order=1, mode='constant', cval=0)
+    obj_real = nd_shift(obj_3d.real, shift_vec, order=1, mode="constant", cval=0)
+    obj_imag = nd_shift(obj_3d.imag, shift_vec, order=1, mode="constant", cval=0)
     obj_new = obj_real + 1j * obj_imag
 
-    amp_new = nd_shift(amp, shift_vec, order=1, mode='constant', cval=0)
-    sup_new = (nd_shift(support.astype(_np.float32), shift_vec,
-                          order=1, mode='constant', cval=0) > 0.5).astype(_np.float32)
+    amp_new = nd_shift(amp, shift_vec, order=1, mode="constant", cval=0)
+    sup_new = (
+        nd_shift(
+            support.astype(_np.float32), shift_vec, order=1, mode="constant", cval=0
+        )
+        > 0.5
+    ).astype(_np.float32)
     phase_new = _np.angle(obj_new)
 
-    print(f"  [center] Shifted by ({shift_vec[0]:.1f}, {shift_vec[1]:.1f}, "
-          f"{shift_vec[2]:.1f}) voxels to center COM")
+    print(
+        f"  [center] Shifted by ({shift_vec[0]:.1f}, {shift_vec[1]:.1f}, "
+        f"{shift_vec[2]:.1f}) voxels to center COM"
+    )
 
     return obj_new, amp_new, phase_new, sup_new
 
@@ -410,7 +450,7 @@ def refined_infer(
     support_threshold: float = 0.05,
     use_shrink_wrap: bool = True,
     max_support_fraction: float = 0.20,
-    algorithm: str = 'hybrid',
+    algorithm: str = "hybrid",
 ) -> AutoPhaseResult:
     """
     AutoPhaseNet prediction + iterative refinement (HIO + RAAR + ER).
@@ -439,8 +479,12 @@ def refined_infer(
 
     # Step 1: NN prediction
     nn_result = nn_only_infer(
-        diffraction, model_path, base_channels, device,
-        enforce_oversampling, support_threshold,
+        diffraction,
+        model_path,
+        base_channels,
+        device,
+        enforce_oversampling,
+        support_threshold,
     )
 
     amplitude = np.sqrt(np.maximum(diffraction, 0)).astype(np.float32)
@@ -452,16 +496,20 @@ def refined_infer(
 
     if nn_sup_count == 0:
         print("[refined] NN support empty → autocorrelation seed")
-        auto_corr = np.abs(np.fft.fftshift(np.fft.ifftn(
-            np.fft.ifftshift(amplitude ** 2))))
+        auto_corr = np.abs(
+            np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(amplitude**2)))
+        )
         auto_thr = 0.10 * auto_corr.max()
-        initial_support = (auto_corr > auto_thr)
+        initial_support = auto_corr > auto_thr
 
     elif nn_sup_count > n_total * max_support_fraction:
-        print(f"[refined] NN support too large ({nn_sup_count/n_total:.1%}) → "
-              "autocorrelation + central N/2 box")
-        auto_corr = np.abs(np.fft.fftshift(np.fft.ifftn(
-            np.fft.ifftshift(amplitude ** 2))))
+        print(
+            f"[refined] NN support too large ({nn_sup_count/n_total:.1%}) → "
+            "autocorrelation + central N/2 box"
+        )
+        auto_corr = np.abs(
+            np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(amplitude**2)))
+        )
         flat_sorted = np.sort(auto_corr.ravel())[::-1]
         k = int(n_total * max_support_fraction)
         auto_thr = flat_sorted[k] if k < len(flat_sorted) else 0
@@ -469,7 +517,7 @@ def refined_infer(
         N = initial_support.shape[0]
         q = N // 4
         center_box = np.zeros_like(initial_support, dtype=bool)
-        center_box[q:N-q, q:N-q, q:N-q] = True
+        center_box[q : N - q, q : N - q, q : N - q] = True
         initial_support = initial_support & center_box
 
     else:
@@ -486,7 +534,8 @@ def refined_infer(
 
     # Slight dilation for edges (helps with cubes/rectangles)
     try:
-        from scipy.ndimage import binary_dilation, binary_closing
+        from scipy.ndimage import binary_closing, binary_dilation
+
         initial_support = binary_closing(initial_support, iterations=1)
         initial_support = binary_dilation(initial_support, iterations=1)
     except ImportError:
@@ -494,11 +543,14 @@ def refined_infer(
 
     initial_support = initial_support.astype(np.float32)
     final_sup_count = int((initial_support > 0.5).sum())
-    print(f"[refined] Initial support: {final_sup_count:,} voxels "
-          f"({final_sup_count/n_total:.1%} of volume)")
+    print(
+        f"[refined] Initial support: {final_sup_count:,} voxels "
+        f"({final_sup_count/n_total:.1%} of volume)"
+    )
 
     # Step 3: Run HIO + RAAR + ER (PRESERVING NN AMPLITUDE)
     from cdi_st.nn_phase_retrieval import run_phase_retrieval
+
     refined = run_phase_retrieval(
         measured_amplitude=amplitude,
         initial_phase=nn_result.phase.astype(np.float32),
@@ -519,8 +571,10 @@ def refined_infer(
     # Sanity check
     final_sup = int((refined.support > 0.5).sum())
     if final_sup > n_total * 0.8:
-        print(f"[refined] WARNING: final support is {final_sup/n_total:.1%} of "
-              "volume — reconstruction may be degenerate")
+        print(
+            f"[refined] WARNING: final support is {final_sup/n_total:.1%} of "
+            "volume — reconstruction may be degenerate"
+        )
 
     # Recompute refined R-factor on NORMALIZED magnitudes (same metric as nn_only)
     # This makes the fallback comparison fair.
@@ -528,7 +582,9 @@ def refined_infer(
     pred_mag_r = np.abs(F_refined)
     pred_n_r = pred_mag_r / max(pred_mag_r.max(), 1e-12)
     meas_n = amplitude / max(amplitude.max(), 1e-12)
-    refined_r_norm = float(np.sum(np.abs(pred_n_r - meas_n)) / max(np.sum(meas_n), 1e-12))
+    refined_r_norm = float(
+        np.sum(np.abs(pred_n_r - meas_n)) / max(np.sum(meas_n), 1e-12)
+    )
 
     nn_r_norm = nn_result.error_metric[-1]  # already normalized
 
@@ -536,14 +592,14 @@ def refined_infer(
 
     # Fallback: keep NN result if refinement made things worse
     if refined_r_norm > nn_r_norm * 1.05:  # only 5% worse triggers fallback
-        print(f"[refined] Refinement worse than NN-only — falling back to NN result")
+        print("[refined] Refinement worse than NN-only — falling back to NN result")
         return AutoPhaseResult(
             object_3d=nn_result.object_3d,
             amplitude=nn_result.amplitude,
             phase=nn_result.phase,
             support=nn_result.support,
             error_metric=[nn_r_norm],
-            method='refined\u2192nn_only_fallback',
+            method="refined\u2192nn_only_fallback",
             elapsed_seconds=time.time() - t0,
         )
 
@@ -564,7 +620,7 @@ def refined_infer(
         phase=refined.phase,
         support=refined.support,
         error_metric=[nn_r_norm] + refined_errors,
-        method='refined',
+        method="refined",
         elapsed_seconds=time.time() - t0,
     )
 
@@ -572,6 +628,7 @@ def refined_infer(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Ensemble inference: AutoPhaseNet + supervised PhaseUNet3D, run in parallel
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def supervised_nn_infer(
     diffraction: np.ndarray,
@@ -589,13 +646,13 @@ def supervised_nn_infer(
     autocorrelation seed.
     """
     t0 = time.time()
-    device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     from cdi_st.nn_phase_model import PhaseUNet3D
 
     model = PhaseUNet3D(in_channels=1, base_channels=base_channels).to(device)
-    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     # Same preprocessing
@@ -614,8 +671,7 @@ def supervised_nn_infer(
     phase = phase_pred[0, 0].cpu().numpy().astype(np.float32) * np.pi
 
     # Build amplitude from autocorrelation (this model doesn't predict amp)
-    auto_corr = np.abs(np.fft.fftshift(np.fft.ifftn(
-        np.fft.ifftshift(magnitude ** 2))))
+    auto_corr = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(magnitude**2))))
     n_total = magnitude.size
     n_target = max(int(n_total * 0.05), 200)  # ~5% of grid as crystal
     flat_sorted = np.sort(auto_corr.ravel())[::-1]
@@ -624,6 +680,7 @@ def supervised_nn_infer(
 
     try:
         from scipy.ndimage import binary_closing
+
         support = binary_closing(support > 0.5, iterations=2).astype(np.float32)
     except ImportError:
         pass
@@ -653,8 +710,12 @@ def supervised_nn_infer(
     r_norm = float(np.sum(np.abs(pred_n - meas_n)) / max(np.sum(meas_n), 1e-12))
 
     return AutoPhaseResult(
-        object_3d=obj, amplitude=amp, phase=phase, support=support,
-        error_metric=[r_norm], method='supervised_nn',
+        object_3d=obj,
+        amplitude=amp,
+        phase=phase,
+        support=support,
+        error_metric=[r_norm],
+        method="supervised_nn",
         elapsed_seconds=time.time() - t0,
     )
 
@@ -669,7 +730,7 @@ def ensemble_infer(
     n_hio: int = 50,
     n_raar: int = 50,
     n_er: int = 20,
-    weight_strategy: str = 'auto',
+    weight_strategy: str = "auto",
 ) -> AutoPhaseResult:
     """
     Ensemble two complementary networks:
@@ -700,25 +761,30 @@ def ensemble_infer(
 
     # Run both models
     print("[ensemble] Running AutoPhaseNet (unsupervised)...")
-    auto_result = nn_only_infer(diffraction, autophase_model,
-                                  base_channels=base_channels_autophase)
+    auto_result = nn_only_infer(
+        diffraction, autophase_model, base_channels=base_channels_autophase
+    )
     auto_r = auto_result.error_metric[-1]
     print(f"  AutoPhaseNet R = {auto_r:.4f}")
 
-    if supervised_model is None or weight_strategy == 'autophase':
+    if supervised_model is None or weight_strategy == "autophase":
         print("[ensemble] Skipping supervised model")
         if refine:
             return refined_infer(
-                diffraction, autophase_model,
+                diffraction,
+                autophase_model,
                 base_channels=base_channels_autophase,
-                n_hio=n_hio, n_raar=n_raar, n_er=n_er,
+                n_hio=n_hio,
+                n_raar=n_raar,
+                n_er=n_er,
             )
         return auto_result
 
     print("[ensemble] Running supervised PhaseUNet3D...")
     try:
         sup_result = supervised_nn_infer(
-            diffraction, supervised_model,
+            diffraction,
+            supervised_model,
             base_channels=base_channels_supervised,
         )
         sup_r = sup_result.error_metric[-1]
@@ -728,18 +794,24 @@ def ensemble_infer(
         print("[ensemble] Falling back to AutoPhaseNet only")
         if refine:
             return refined_infer(
-                diffraction, autophase_model,
+                diffraction,
+                autophase_model,
                 base_channels=base_channels_autophase,
-                n_hio=n_hio, n_raar=n_raar, n_er=n_er,
+                n_hio=n_hio,
+                n_raar=n_raar,
+                n_er=n_er,
             )
         return auto_result
 
-    if weight_strategy == 'supervised':
+    if weight_strategy == "supervised":
         if refine:
             # Use supervised result as init for refinement
             return _refine_from_result(
-                sup_result, diffraction,
-                n_hio=n_hio, n_raar=n_raar, n_er=n_er,
+                sup_result,
+                diffraction,
+                n_hio=n_hio,
+                n_raar=n_raar,
+                n_er=n_er,
             )
         return sup_result
 
@@ -754,7 +826,7 @@ def ensemble_infer(
     amp_combined = auto_result.amplitude.copy()
 
     # 3. Weighted circular mean of the two phases inside the support
-    if weight_strategy == 'auto':
+    if weight_strategy == "auto":
         w_auto = 1.0 / max(auto_r, 1e-3)
         w_sup = 1.0 / max(sup_r, 1e-3)
         total = w_auto + w_sup
@@ -768,8 +840,9 @@ def ensemble_infer(
 
     # Circular mean of phases (only meaningful inside the AutoPhaseNet support;
     # supervised's phase outside its own support is meaningless)
-    z_combined = (w_auto * np.exp(1j * auto_result.phase) +
-                  w_sup * np.exp(1j * sup_result.phase))
+    z_combined = w_auto * np.exp(1j * auto_result.phase) + w_sup * np.exp(
+        1j * sup_result.phase
+    )
     phase_combined = np.angle(z_combined).astype(np.float32)
     # Outside support, set phase to AutoPhase value (won't matter — amp=0 there)
     out_mask = support_combined < 0.5
@@ -800,17 +873,24 @@ def ensemble_infer(
     best_solo_r = min(auto_r, sup_r)
     if r_combined > best_solo_r * 1.10:
         if auto_r <= sup_r:
-            print(f"[ensemble] Combined ({r_combined:.4f}) worse than AutoPhase "
-                  f"({auto_r:.4f}) — keeping AutoPhaseNet result")
+            print(
+                f"[ensemble] Combined ({r_combined:.4f}) worse than AutoPhase "
+                f"({auto_r:.4f}) — keeping AutoPhaseNet result"
+            )
             best_result = auto_result
         else:
-            print(f"[ensemble] Combined ({r_combined:.4f}) worse than supervised "
-                  f"({sup_r:.4f}) — keeping supervised result")
+            print(
+                f"[ensemble] Combined ({r_combined:.4f}) worse than supervised "
+                f"({sup_r:.4f}) — keeping supervised result"
+            )
             best_result = sup_result
         if refine:
             return _refine_from_result(
-                best_result, diffraction,
-                n_hio=n_hio, n_raar=n_raar, n_er=n_er,
+                best_result,
+                diffraction,
+                n_hio=n_hio,
+                n_raar=n_raar,
+                n_er=n_er,
             )
         return best_result
 
@@ -820,7 +900,7 @@ def ensemble_infer(
         phase=phase_combined,
         support=support_combined,
         error_metric=[auto_r, sup_r, r_combined],
-        method='ensemble',
+        method="ensemble",
         elapsed_seconds=time.time() - t0,
     )
 
@@ -829,14 +909,18 @@ def ensemble_infer(
 
     # Refine the combined result
     return _refine_from_result(
-        combined_result, diffraction,
-        n_hio=n_hio, n_raar=n_raar, n_er=n_er,
+        combined_result,
+        diffraction,
+        n_hio=n_hio,
+        n_raar=n_raar,
+        n_er=n_er,
     )
 
 
 def _refine_from_result(seed_result, diffraction, n_hio=50, n_raar=50, n_er=20):
     """Helper: refine an existing AutoPhaseResult with HIO/RAAR/ER."""
     from cdi_st.nn_phase_retrieval import run_phase_retrieval
+
     amplitude = np.sqrt(np.maximum(diffraction, 0)).astype(np.float32)
 
     refined = run_phase_retrieval(
@@ -847,7 +931,7 @@ def _refine_from_result(seed_result, diffraction, n_hio=50, n_raar=50, n_er=20):
         n_hio=n_hio,
         n_raar=n_raar,
         n_er=n_er,
-        algorithm='hybrid',
+        algorithm="hybrid",
         use_shrink_wrap=True,
         shrink_wrap_interval=10,
         shrink_wrap_threshold=0.10,
@@ -863,8 +947,10 @@ def _refine_from_result(seed_result, diffraction, n_hio=50, n_raar=50, n_er=20):
 
     seed_r = seed_result.error_metric[-1]
     if r_norm > seed_r * 1.05:
-        print(f"[refine] Refinement worse than seed ({r_norm:.4f} vs {seed_r:.4f}), "
-              "keeping seed")
+        print(
+            f"[refine] Refinement worse than seed ({r_norm:.4f} vs {seed_r:.4f}), "
+            "keeping seed"
+        )
         return seed_result
 
     # NOTE: no shift — see refined_infer for rationale. Centering is done
@@ -876,7 +962,7 @@ def _refine_from_result(seed_result, diffraction, n_hio=50, n_raar=50, n_er=20):
         phase=refined.phase,
         support=refined.support,
         error_metric=seed_result.error_metric + [r_norm],
-        method='ensemble_refined' if seed_result.method == 'ensemble' else 'refined',
+        method="ensemble_refined" if seed_result.method == "ensemble" else "refined",
         elapsed_seconds=seed_result.elapsed_seconds,
     )
 
@@ -884,6 +970,7 @@ def _refine_from_result(seed_result, diffraction, n_hio=50, n_raar=50, n_er=20):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Comparison mode
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def compare_methods(
     diffraction: np.ndarray,
@@ -895,37 +982,40 @@ def compare_methods(
     results = {}
 
     print("\n── [1/2] AutoPhaseNet — NN-only prediction ──")
-    results['nn_only'] = nn_only_infer(diffraction, model_path, base_channels)
-    r = results['nn_only']
+    results["nn_only"] = nn_only_infer(diffraction, model_path, base_channels)
+    r = results["nn_only"]
     print(f"  Time: {r.elapsed_seconds:.3f}s   R-factor: {r.error_metric[-1]:.4f}")
 
     print("\n── [2/2] AutoPhaseNet + RAAR/ER refinement ──")
-    results['refined'] = refined_infer(diffraction, model_path, base_channels,
-                                         n_raar=50, n_er=20)
-    r = results['refined']
+    results["refined"] = refined_infer(
+        diffraction, model_path, base_channels, n_raar=50, n_er=20
+    )
+    r = results["refined"]
     print(f"  Time: {r.elapsed_seconds:.3f}s   R-factor: {r.error_metric[-1]:.4f}")
 
     # Quality vs ground truth if available
     if truth is not None:
         print(f"\n{'='*56}")
-        print(f"  Quality vs ground truth")
+        print("  Quality vs ground truth")
         print(f"{'='*56}")
         print(f"  {'Method':<15} {'R-factor':>10} {'Phase RMSE':>12} {'Time':>10}")
         print(f"  {'-'*52}")
         for name, result in results.items():
-            phase_true = truth['phase_true']
-            sup = truth['support'] > 0.5
+            phase_true = truth["phase_true"]
+            sup = truth["support"] > 0.5
             if sup.sum() > 10:
                 # Remove global phase offset for fair comparison
                 mean_r = np.angle(np.mean(np.exp(1j * result.phase[sup])))
                 mean_t = np.angle(np.mean(np.exp(1j * phase_true[sup])))
                 perr = result.phase[sup] - mean_r - (phase_true[sup] - mean_t)
                 perr = np.angle(np.exp(1j * perr))
-                rmse = np.sqrt(np.mean(perr ** 2))
+                rmse = np.sqrt(np.mean(perr**2))
             else:
-                rmse = float('nan')
-            print(f"  {name:<15} {result.error_metric[-1]:>10.4f} "
-                  f"{rmse:>12.3f} {result.elapsed_seconds:>9.2f}s")
+                rmse = float("nan")
+            print(
+                f"  {name:<15} {result.error_metric[-1]:>10.4f} "
+                f"{rmse:>12.3f} {result.elapsed_seconds:>9.2f}s"
+            )
         print(f"{'='*56}")
 
     return results
@@ -934,6 +1024,7 @@ def compare_methods(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Save utility
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def save_result(result: AutoPhaseResult, path: str):
     """Save reconstruction to .npz compatible with nn_visualize.py."""
@@ -953,26 +1044,33 @@ def save_result(result: AutoPhaseResult, path: str):
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='AutoPhaseNet inference')
-    parser.add_argument('--input', required=True,
-                        help='.npz (simulated or preprocessed) or .h5 (raw)')
-    parser.add_argument('--model', required=True,
-                        help='Trained AutoPhaseNet checkpoint')
-    parser.add_argument('--output', default='autophase_reconstruction.npz')
-    parser.add_argument('--mode', choices=['nn_only', 'refined', 'compare'],
-                        default='refined')
-    parser.add_argument('--n_raar', type=int, default=50)
-    parser.add_argument('--n_er', type=int, default=20)
-    parser.add_argument('--base_channels', type=int, default=32)
-    parser.add_argument('--support_threshold', type=float, default=0.1)
-    parser.add_argument('--no_oversampling', action='store_true')
-    parser.add_argument('--target_size', type=int, default=64,
-                        help='For .h5 input: crop/pad to this size')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AutoPhaseNet inference")
+    parser.add_argument(
+        "--input", required=True, help=".npz (simulated or preprocessed) or .h5 (raw)"
+    )
+    parser.add_argument(
+        "--model", required=True, help="Trained AutoPhaseNet checkpoint"
+    )
+    parser.add_argument("--output", default="autophase_reconstruction.npz")
+    parser.add_argument(
+        "--mode", choices=["nn_only", "refined", "compare"], default="refined"
+    )
+    parser.add_argument("--n_raar", type=int, default=50)
+    parser.add_argument("--n_er", type=int, default=20)
+    parser.add_argument("--base_channels", type=int, default=32)
+    parser.add_argument("--support_threshold", type=float, default=0.1)
+    parser.add_argument("--no_oversampling", action="store_true")
+    parser.add_argument(
+        "--target_size",
+        type=int,
+        default=64,
+        help="For .h5 input: crop/pad to this size",
+    )
     args = parser.parse_args()
 
     print(f"\n{'='*56}")
-    print(f"  AutoPhaseNet3D inference")
+    print("  AutoPhaseNet3D inference")
     print(f"{'='*56}")
     print(f"  Input:  {args.input}")
     print(f"  Model:  {args.model}")
@@ -982,27 +1080,35 @@ if __name__ == '__main__':
     diffraction, truth, voxel_nm = load_input(args.input, target_size=args.target_size)
     print(f"  Loaded diffraction volume: shape={diffraction.shape}")
     if truth is not None:
-        print(f"  Ground truth available (simulated data)")
+        print("  Ground truth available (simulated data)")
 
     enforce_os = not args.no_oversampling
 
-    if args.mode == 'nn_only':
-        r = nn_only_infer(diffraction, args.model, args.base_channels,
-                          enforce_oversampling=enforce_os,
-                          support_threshold=args.support_threshold)
+    if args.mode == "nn_only":
+        r = nn_only_infer(
+            diffraction,
+            args.model,
+            args.base_channels,
+            enforce_oversampling=enforce_os,
+            support_threshold=args.support_threshold,
+        )
         save_result(r, args.output)
 
-    elif args.mode == 'refined':
-        r = refined_infer(diffraction, args.model, args.base_channels,
-                          n_raar=args.n_raar, n_er=args.n_er,
-                          enforce_oversampling=enforce_os,
-                          support_threshold=args.support_threshold)
+    elif args.mode == "refined":
+        r = refined_infer(
+            diffraction,
+            args.model,
+            args.base_channels,
+            n_raar=args.n_raar,
+            n_er=args.n_er,
+            enforce_oversampling=enforce_os,
+            support_threshold=args.support_threshold,
+        )
         save_result(r, args.output)
 
-    elif args.mode == 'compare':
-        results = compare_methods(diffraction, args.model, truth,
-                                    args.base_channels)
+    elif args.mode == "compare":
+        results = compare_methods(diffraction, args.model, truth, args.base_channels)
         # Save the refined (best) result
-        save_result(results['refined'], args.output)
+        save_result(results["refined"], args.output)
 
     print("\nDone.")

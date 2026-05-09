@@ -5,61 +5,94 @@ nn_gui_tabs.py — Three new tabs for the BCDI GUI:
     T6: 3D Reconstruction Viewer — interactive 3D with phase/strain/density
 """
 
-import sys, os, tempfile, json, time
-import numpy as np
+import os
+import time
 from pathlib import Path
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QSize
-from PyQt6.QtGui import QColor, QFont
+
+import numpy as np
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QGroupBox,
-    QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
-    QProgressBar, QPlainTextEdit, QFrame, QCheckBox, QScrollArea,
-    QFileDialog, QSplitter, QSlider, QMessageBox, QTabWidget, QApplication,
-    QDialog
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
+
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
+
     _HAS_WEB = True
 except ImportError:
     _HAS_WEB = False
 
 import matplotlib
-matplotlib.use('QtAgg')
+
+matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 MPL_DARK = {
-    'figure.facecolor': '#0d1117', 'axes.facecolor': '#000005',
-    'axes.edgecolor': '#30363d', 'axes.labelcolor': '#e6edf3',
-    'axes.titlecolor': '#e6edf3', 'xtick.color': '#8b949e',
-    'ytick.color': '#8b949e', 'text.color': '#e6edf3', 'font.size': 9
+    "figure.facecolor": "#0d1117",
+    "axes.facecolor": "#000005",
+    "axes.edgecolor": "#30363d",
+    "axes.labelcolor": "#e6edf3",
+    "axes.titlecolor": "#e6edf3",
+    "xtick.color": "#8b949e",
+    "ytick.color": "#8b949e",
+    "text.color": "#e6edf3",
+    "font.size": 9,
 }
 
 
 def _dbl(lo, hi, v, d, suf=""):
     s = QDoubleSpinBox()
-    s.setRange(lo, hi); s.setDecimals(d); s.setValue(v); s.setMinimumWidth(100)
+    s.setRange(lo, hi)
+    s.setDecimals(d)
+    s.setValue(v)
+    s.setMinimumWidth(100)
     if suf:
         s.setSuffix(suf)
     return s
 
 
 def _ph(m):
-    return (f'<html><head><style>html,body{{height:100%;margin:0;background:#0a0d12;'
-            f'color:#8b949e}}.w{{height:100%;display:flex;align-items:center;'
-            f'justify-content:center}}.i{{padding:24px;border:1px dashed #30363d;'
-            f'border-radius:8px}}</style></head><body><div class="w">'
-            f'<div class="i">{m}</div></div></body></html>')
+    return (
+        f"<html><head><style>html,body{{height:100%;margin:0;background:#0a0d12;"
+        f"color:#8b949e}}.w{{height:100%;display:flex;align-items:center;"
+        f"justify-content:center}}.i{{padding:24px;border:1px dashed #30363d;"
+        f'border-radius:8px}}</style></head><body><div class="w">'
+        f'<div class="i">{m}</div></div></body></html>'
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Worker threads
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TrainingWorker(QThread):
     """Run data generation + NN training in a background thread."""
+
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
     epoch_done = pyqtSignal(int, float, float)  # epoch, train_loss, val_loss
@@ -73,23 +106,24 @@ class TrainingWorker(QThread):
     def _apply_noise(self, measured, p):
         """Apply on-the-fly experimental noise to a batch of measured magnitudes."""
         import torch as _t
+
         # Convert magnitude → intensity
-        intensity = measured ** 2
+        intensity = measured**2
 
         # Air scatter: uniform background
-        if p.get('noise_air', 0) > 0:
-            intensity = intensity + p['noise_air']
+        if p.get("noise_air", 0) > 0:
+            intensity = intensity + p["noise_air"]
 
         # Poisson (photon shot noise)
-        if p.get('noise_poisson', False):
+        if p.get("noise_poisson", False):
             intensity = _t.poisson(intensity.clamp(min=0))
 
         # Readout: Gaussian electronic noise
-        if p.get('noise_readout', 0) > 0:
-            intensity = intensity + _t.randn_like(intensity) * p['noise_readout']
+        if p.get("noise_readout", 0) > 0:
+            intensity = intensity + _t.randn_like(intensity) * p["noise_readout"]
 
         # Dead pixels: random fraction zeroed out
-        dead = p.get('noise_dead', 0)
+        dead = p.get("noise_dead", 0)
         if dead > 0:
             mask = (_t.rand_like(intensity) > dead).float()
             intensity = intensity * mask
@@ -101,20 +135,26 @@ class TrainingWorker(QThread):
     def run(self):
         try:
             import torch
-            from cdi_st.nn_autophase_model import AutoPhaseNet3D, PhysicsForwardModel, UnsupervisedBCDILoss, count_parameters
-            from cdi_st.nn_autophase_train import UnsupervisedBCDIDataset
-            from torch.utils.data import DataLoader, random_split
-            from torch.amp import GradScaler, autocast
             import torch.optim as optim
+            from torch.amp import GradScaler, autocast
+            from torch.utils.data import DataLoader, random_split
+
+            from cdi_st.nn_autophase_model import (
+                AutoPhaseNet3D,
+                PhysicsForwardModel,
+                UnsupervisedBCDILoss,
+                count_parameters,
+            )
+            from cdi_st.nn_autophase_train import UnsupervisedBCDIDataset
 
             p = self.p
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.log.emit(f"Device: {device}")
-            if device.type == 'cuda':
+            if device.type == "cuda":
                 self.log.emit(f"GPU: {torch.cuda.get_device_name()}")
 
             # --- Step 1: Verify data ---
-            data_dir = Path(p['data_dir'])
+            data_dir = Path(p["data_dir"])
             npz_files = sorted(data_dir.glob("sample_*.npz"))
             h5_files = sorted(data_dir.glob("*.h5"))
             n_files = len(npz_files) + len(h5_files)
@@ -124,100 +164,118 @@ class TrainingWorker(QThread):
             self.log.emit(f"Found {n_files} files in {data_dir}")
 
             # --- Step 2: Build dataset ---
-            full_ds = UnsupervisedBCDIDataset(str(data_dir), augment=False,
-                                               grid_size=p['grid_size'])
+            full_ds = UnsupervisedBCDIDataset(
+                str(data_dir), augment=False, grid_size=p["grid_size"]
+            )
             n = len(full_ds)
             n_val = max(1, int(n * 0.15))
             n_train = n - n_val
             train_ds, val_ds = random_split(
-                full_ds, [n_train, n_val],
-                generator=torch.Generator().manual_seed(42)
+                full_ds, [n_train, n_val], generator=torch.Generator().manual_seed(42)
             )
-            train_ds.dataset = UnsupervisedBCDIDataset(str(data_dir), augment=True,
-                                                         grid_size=p['grid_size'])
-            train_loader = DataLoader(train_ds, batch_size=p['batch_size'],
-                                       shuffle=True, num_workers=0, drop_last=True)
-            val_loader = DataLoader(val_ds, batch_size=p['batch_size'],
-                                     shuffle=False, num_workers=0)
+            train_ds.dataset = UnsupervisedBCDIDataset(
+                str(data_dir), augment=True, grid_size=p["grid_size"]
+            )
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=p["batch_size"],
+                shuffle=True,
+                num_workers=0,
+                drop_last=True,
+            )
+            val_loader = DataLoader(
+                val_ds, batch_size=p["batch_size"], shuffle=False, num_workers=0
+            )
             self.log.emit(f"Train: {n_train}  Val: {n_val}  Batch: {p['batch_size']}")
 
             # --- Step 3: Build model ---
-            model = AutoPhaseNet3D(base_channels=p['base_channels'],
-                                    enforce_oversampling=p['enforce_oversampling']).to(device)
-            physics = PhysicsForwardModel(threshold=p['threshold']).to(device)
-            loss_fn = UnsupervisedBCDILoss(support_smoothness=p['support_smoothness'],
-                                             tv_phase=p['tv_phase'])
+            model = AutoPhaseNet3D(
+                base_channels=p["base_channels"],
+                enforce_oversampling=p["enforce_oversampling"],
+            ).to(device)
+            physics = PhysicsForwardModel(threshold=p["threshold"]).to(device)
+            loss_fn = UnsupervisedBCDILoss(
+                support_smoothness=p["support_smoothness"], tv_phase=p["tv_phase"]
+            )
             n_params = count_parameters(model)
-            self.log.emit(f"Model: {n_params:,} parameters, base_ch={p['base_channels']}")
+            self.log.emit(
+                f"Model: {n_params:,} parameters, base_ch={p['base_channels']}"
+            )
 
-            optimizer = optim.AdamW(model.parameters(), lr=p['lr'], weight_decay=1e-5)
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
-            scaler = GradScaler('cuda', enabled=(device.type == 'cuda'))
+            optimizer = optim.AdamW(model.parameters(), lr=p["lr"], weight_decay=1e-5)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, "min", factor=0.5, patience=5
+            )
+            scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
             # Resume
             start_epoch = 0
-            best_val = float('inf')
-            if p.get('resume') and os.path.exists(p['resume']):
-                ckpt = torch.load(p['resume'], map_location='cpu', weights_only=False)
-                model.load_state_dict(ckpt['model_state_dict'])
-                start_epoch = ckpt.get('epoch', 0)
-                best_val = ckpt.get('val_loss', float('inf'))
+            best_val = float("inf")
+            if p.get("resume") and os.path.exists(p["resume"]):
+                ckpt = torch.load(p["resume"], map_location="cpu", weights_only=False)
+                model.load_state_dict(ckpt["model_state_dict"])
+                start_epoch = ckpt.get("epoch", 0)
+                best_val = ckpt.get("val_loss", float("inf"))
                 self.log.emit(f"Resumed from epoch {start_epoch}")
 
-            out_dir = Path(p['output_dir'])
+            out_dir = Path(p["output_dir"])
             out_dir.mkdir(parents=True, exist_ok=True)
             no_improve = 0
 
             # --- Step 4: Training loop ---
-            for epoch in range(start_epoch, p['epochs']):
+            for epoch in range(start_epoch, p["epochs"]):
                 model.train()
                 t0 = time.time()
-                train_total = 0; train_n = 0
+                train_total = 0
+                train_n = 0
                 for batch in train_loader:
-                    inp = batch['input'].to(device)
-                    measured = batch['measured'].to(device)
+                    inp = batch["input"].to(device)
+                    measured = batch["measured"].to(device)
 
                     # Apply on-the-fly noise to make model robust to real data
-                    if p.get('apply_noise', False):
+                    if p.get("apply_noise", False):
                         with torch.no_grad():
                             measured = self._apply_noise(measured, p)
                             # Recompute log-normalized input from noisy measurement
                             log_mag = torch.log10(measured + 1.0)
-                            scale = log_mag.amax(dim=(1,2,3,4), keepdim=True).clamp(min=1e-6)
+                            scale = log_mag.amax(dim=(1, 2, 3, 4), keepdim=True).clamp(
+                                min=1e-6
+                            )
                             inp = log_mag / scale
 
                     optimizer.zero_grad(set_to_none=True)
-                    with autocast('cuda', enabled=(device.type == 'cuda')):
+                    with autocast("cuda", enabled=(device.type == "cuda")):
                         amp, phase = model(inp)
                         pred_diff, support = physics(amp, phase)
                         losses = loss_fn(pred_diff, measured, amp, phase, support)
-                    scaler.scale(losses['total']).backward()
+                    scaler.scale(losses["total"]).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
                     scaler.update()
-                    train_total += losses['total'].item()
+                    train_total += losses["total"].item()
                     train_n += 1
 
                 # Validate
                 model.eval()
-                val_total = 0; val_n = 0
+                val_total = 0
+                val_n = 0
                 with torch.no_grad():
                     for batch in val_loader:
-                        inp = batch['input'].to(device)
-                        measured = batch['measured'].to(device)
-                        with autocast('cuda', enabled=(device.type == 'cuda')):
+                        inp = batch["input"].to(device)
+                        measured = batch["measured"].to(device)
+                        with autocast("cuda", enabled=(device.type == "cuda")):
                             amp, phase = model(inp)
                             pred_diff, support = physics(amp, phase)
                             losses = loss_fn(pred_diff, measured, amp, phase, support)
-                        val_total += losses['total'].item()
+                        val_total += losses["total"].item()
                         val_n += 1
 
                 train_loss = train_total / max(train_n, 1)
                 val_loss = val_total / max(val_n, 1)
                 scheduler.step(val_loss)
                 elapsed = time.time() - t0
-                lr_now = optimizer.param_groups[0]['lr']
+                lr_now = optimizer.param_groups[0]["lr"]
 
                 self.log.emit(
                     f"Epoch {epoch+1}/{p['epochs']}  "
@@ -225,34 +283,38 @@ class TrainingWorker(QThread):
                     f"lr={lr_now:.1e}  ({elapsed:.1f}s)"
                 )
                 self.epoch_done.emit(epoch + 1, train_loss, val_loss)
-                self.progress.emit(int(100 * (epoch + 1) / p['epochs']))
+                self.progress.emit(int(100 * (epoch + 1) / p["epochs"]))
 
                 # Checkpoint
                 if val_loss < best_val:
                     best_val = val_loss
-                    torch.save({
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'scaler_state_dict': scaler.state_dict(),
-                        'val_loss': best_val,
-                        'grid_size': p['grid_size'],
-                        'base_channels': p['base_channels'],
-                        'enforce_oversampling': p['enforce_oversampling'],
-                    }, out_dir / 'best_model.pt')
+                    torch.save(
+                        {
+                            "epoch": epoch + 1,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict(),
+                            "scaler_state_dict": scaler.state_dict(),
+                            "val_loss": best_val,
+                            "grid_size": p["grid_size"],
+                            "base_channels": p["base_channels"],
+                            "enforce_oversampling": p["enforce_oversampling"],
+                        },
+                        out_dir / "best_model.pt",
+                    )
                     self.log.emit(f"  ★ New best model saved (val={best_val:.5f})")
                     no_improve = 0
                 else:
                     no_improve += 1
-                    if no_improve >= p['patience']:
+                    if no_improve >= p["patience"]:
                         self.log.emit("Early stopping.")
                         break
 
-            self.finished.emit(str(out_dir / 'best_model.pt'))
+            self.finished.emit(str(out_dir / "best_model.pt"))
 
         except Exception as e:
             import traceback
+
             self.failed.emit(f"{e}\n{traceback.format_exc()}")
 
 
@@ -265,6 +327,7 @@ class SupervisedTrainingWorker(QThread):
     generator already produces these — they're ignored when training
     AutoPhaseNet.
     """
+
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
     epoch_done = pyqtSignal(int, float, float)
@@ -281,16 +344,21 @@ class SupervisedTrainingWorker(QThread):
             import torch.optim as optim
             from torch.amp import GradScaler, autocast
             from torch.utils.data import DataLoader, random_split
-            from cdi_st.nn_phase_model import PhaseUNet3D, BCDIPhaseLoss, count_parameters
+
             from cdi_st.nn_dataset import BCDIDataset
+            from cdi_st.nn_phase_model import (
+                BCDIPhaseLoss,
+                PhaseUNet3D,
+                count_parameters,
+            )
 
             p = self.p
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.log.emit(f"Device: {device}")
-            if device.type == 'cuda':
+            if device.type == "cuda":
                 self.log.emit(f"GPU: {torch.cuda.get_device_name()}")
 
-            data_dir = Path(p['data_dir'])
+            data_dir = Path(p["data_dir"])
             files = sorted(data_dir.glob("sample_*.npz"))
             if len(files) == 0:
                 self.failed.emit(f"No sample_*.npz files in {data_dir}")
@@ -298,9 +366,10 @@ class SupervisedTrainingWorker(QThread):
 
             # Verify ground truth keys exist (needed for supervised training)
             import numpy as np
+
             try:
                 test = np.load(files[0])
-                if 'phase_true' not in test or 'support' not in test:
+                if "phase_true" not in test or "support" not in test:
                     self.failed.emit(
                         "Supervised training requires .npz files with "
                         "'phase_true' and 'support' keys. Files generated "
@@ -316,64 +385,80 @@ class SupervisedTrainingWorker(QThread):
             self.log.emit(f"Found {len(files)} files in {data_dir}")
 
             # Build dataset
-            full_ds = BCDIDataset(str(data_dir), augment=False, grid_size=p['grid_size'])
+            full_ds = BCDIDataset(
+                str(data_dir), augment=False, grid_size=p["grid_size"]
+            )
             n = len(full_ds)
             n_val = max(1, int(n * 0.15))
             n_train = n - n_val
             train_ds, val_ds = random_split(
-                full_ds, [n_train, n_val],
+                full_ds,
+                [n_train, n_val],
                 generator=torch.Generator().manual_seed(42),
             )
-            train_ds.dataset = BCDIDataset(str(data_dir), augment=True,
-                                             grid_size=p['grid_size'])
-            train_loader = DataLoader(train_ds, batch_size=p['batch_size'],
-                                       shuffle=True, num_workers=0, drop_last=True)
-            val_loader = DataLoader(val_ds, batch_size=p['batch_size'],
-                                     shuffle=False, num_workers=0)
+            train_ds.dataset = BCDIDataset(
+                str(data_dir), augment=True, grid_size=p["grid_size"]
+            )
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=p["batch_size"],
+                shuffle=True,
+                num_workers=0,
+                drop_last=True,
+            )
+            val_loader = DataLoader(
+                val_ds, batch_size=p["batch_size"], shuffle=False, num_workers=0
+            )
             self.log.emit(f"Train: {n_train}  Val: {n_val}  Batch: {p['batch_size']}")
 
             # Model + loss
-            model = PhaseUNet3D(in_channels=1, base_channels=p['base_channels']).to(device)
+            model = PhaseUNet3D(in_channels=1, base_channels=p["base_channels"]).to(
+                device
+            )
             loss_fn = BCDIPhaseLoss(
-                alpha_amp=p.get('alpha_amp', 1.0),
-                beta_phase=p.get('beta_phase', 1.0),
-                gamma_diff=p.get('gamma_diff', 0.5),
+                alpha_amp=p.get("alpha_amp", 1.0),
+                beta_phase=p.get("beta_phase", 1.0),
+                gamma_diff=p.get("gamma_diff", 0.5),
             )
             n_params = count_parameters(model)
-            self.log.emit(f"PhaseUNet3D: {n_params:,} parameters, base_ch={p['base_channels']}")
+            self.log.emit(
+                f"PhaseUNet3D: {n_params:,} parameters, base_ch={p['base_channels']}"
+            )
 
-            optimizer = optim.AdamW(model.parameters(), lr=p['lr'], weight_decay=1e-5)
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min',
-                                                                factor=0.5, patience=5)
-            scaler = GradScaler('cuda', enabled=(device.type == 'cuda'))
+            optimizer = optim.AdamW(model.parameters(), lr=p["lr"], weight_decay=1e-5)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, "min", factor=0.5, patience=5
+            )
+            scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
             start_epoch = 0
-            best_val = float('inf')
-            if p.get('resume') and os.path.exists(p['resume']):
-                ckpt = torch.load(p['resume'], map_location='cpu', weights_only=False)
-                model.load_state_dict(ckpt['model_state_dict'])
-                start_epoch = ckpt.get('epoch', 0)
-                best_val = ckpt.get('val_loss', float('inf'))
+            best_val = float("inf")
+            if p.get("resume") and os.path.exists(p["resume"]):
+                ckpt = torch.load(p["resume"], map_location="cpu", weights_only=False)
+                model.load_state_dict(ckpt["model_state_dict"])
+                start_epoch = ckpt.get("epoch", 0)
+                best_val = ckpt.get("val_loss", float("inf"))
                 self.log.emit(f"Resumed from epoch {start_epoch}")
 
-            out_dir = Path(p['output_dir'])
+            out_dir = Path(p["output_dir"])
             out_dir.mkdir(parents=True, exist_ok=True)
             no_improve = 0
 
             # Training loop
-            for epoch in range(start_epoch, p['epochs']):
+            for epoch in range(start_epoch, p["epochs"]):
                 model.train()
                 t0 = time.time()
-                train_total = 0; train_n = 0
+                train_total = 0
+                train_n = 0
 
                 for batch in train_loader:
-                    inp = batch['input'].to(device)
-                    phase_true = batch['phase_true'].to(device)
-                    support = batch['support'].to(device)
-                    diff_amp = batch['amplitude'].to(device)
+                    inp = batch["input"].to(device)
+                    phase_true = batch["phase_true"].to(device)
+                    support = batch["support"].to(device)
+                    diff_amp = batch["amplitude"].to(device)
 
                     optimizer.zero_grad(set_to_none=True)
-                    with autocast('cuda', enabled=(device.type == 'cuda')):
+                    with autocast("cuda", enabled=(device.type == "cuda")):
                         phase_pred = model(inp)
                         losses = loss_fn(
                             phase_pred=phase_pred,
@@ -381,24 +466,25 @@ class SupervisedTrainingWorker(QThread):
                             support=support,
                             diff_amp=diff_amp,
                         )
-                    scaler.scale(losses['total']).backward()
+                    scaler.scale(losses["total"]).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
                     scaler.update()
-                    train_total += losses['total'].item()
+                    train_total += losses["total"].item()
                     train_n += 1
 
                 # Validate
                 model.eval()
-                val_total = 0; val_n = 0
+                val_total = 0
+                val_n = 0
                 with torch.no_grad():
                     for batch in val_loader:
-                        inp = batch['input'].to(device)
-                        phase_true = batch['phase_true'].to(device)
-                        support = batch['support'].to(device)
-                        diff_amp = batch['amplitude'].to(device)
-                        with autocast('cuda', enabled=(device.type == 'cuda')):
+                        inp = batch["input"].to(device)
+                        phase_true = batch["phase_true"].to(device)
+                        support = batch["support"].to(device)
+                        diff_amp = batch["amplitude"].to(device)
+                        with autocast("cuda", enabled=(device.type == "cuda")):
                             phase_pred = model(inp)
                             losses = loss_fn(
                                 phase_pred=phase_pred,
@@ -406,14 +492,14 @@ class SupervisedTrainingWorker(QThread):
                                 support=support,
                                 diff_amp=diff_amp,
                             )
-                        val_total += losses['total'].item()
+                        val_total += losses["total"].item()
                         val_n += 1
 
                 train_loss = train_total / max(train_n, 1)
                 val_loss = val_total / max(val_n, 1)
                 scheduler.step(val_loss)
                 elapsed = time.time() - t0
-                lr_now = optimizer.param_groups[0]['lr']
+                lr_now = optimizer.param_groups[0]["lr"]
 
                 self.log.emit(
                     f"Epoch {epoch+1}/{p['epochs']}  "
@@ -421,37 +507,42 @@ class SupervisedTrainingWorker(QThread):
                     f"lr={lr_now:.1e}  ({elapsed:.1f}s)"
                 )
                 self.epoch_done.emit(epoch + 1, train_loss, val_loss)
-                self.progress.emit(int(100 * (epoch + 1) / p['epochs']))
+                self.progress.emit(int(100 * (epoch + 1) / p["epochs"]))
 
                 if val_loss < best_val:
                     best_val = val_loss
-                    torch.save({
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'scaler_state_dict': scaler.state_dict(),
-                        'val_loss': best_val,
-                        'grid_size': p['grid_size'],
-                        'base_channels': p['base_channels'],
-                    }, out_dir / 'best_model.pt')
+                    torch.save(
+                        {
+                            "epoch": epoch + 1,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict(),
+                            "scaler_state_dict": scaler.state_dict(),
+                            "val_loss": best_val,
+                            "grid_size": p["grid_size"],
+                            "base_channels": p["base_channels"],
+                        },
+                        out_dir / "best_model.pt",
+                    )
                     self.log.emit(f"  \u2605 New best (val={best_val:.5f})")
                     no_improve = 0
                 else:
                     no_improve += 1
-                    if no_improve >= p['patience']:
+                    if no_improve >= p["patience"]:
                         self.log.emit("Early stopping.")
                         break
 
-            self.finished.emit(str(out_dir / 'best_model.pt'))
+            self.finished.emit(str(out_dir / "best_model.pt"))
 
         except Exception as e:
             import traceback
+
             self.failed.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class ReconstructionWorker(QThread):
     """Run NN inference + RAAR refinement in background."""
+
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
     done = pyqtSignal(dict)  # result dict with all arrays
@@ -468,18 +559,26 @@ class ReconstructionWorker(QThread):
             self.progress.emit(5)
 
             # Load input
-            from cdi_st.nn_autophase_infer import (
-                load_input, nn_only_infer, refined_infer, ensemble_infer
-            )
-
             # Read model checkpoint to find its trained grid size (if available)
             import torch as _torch
+
+            from cdi_st.nn_autophase_infer import (
+                ensemble_infer,
+                load_input,
+                nn_only_infer,
+                refined_infer,
+            )
+
             try:
-                _ckpt_meta = _torch.load(p['model_path'], map_location='cpu', weights_only=False)
-                model_grid = _ckpt_meta.get('grid_size', None)
-                model_channels = _ckpt_meta.get('base_channels', None)
+                _ckpt_meta = _torch.load(
+                    p["model_path"], map_location="cpu", weights_only=False
+                )
+                model_grid = _ckpt_meta.get("grid_size", None)
+                model_channels = _ckpt_meta.get("base_channels", None)
                 if model_grid:
-                    self.log.emit(f"Model trained at grid {model_grid}\u00b3, base_channels={model_channels}")
+                    self.log.emit(
+                        f"Model trained at grid {model_grid}\u00b3, base_channels={model_channels}"
+                    )
                 else:
                     # Old checkpoint without metadata. The model is fully
                     # convolutional so it can run at the input's native size.
@@ -496,12 +595,14 @@ class ReconstructionWorker(QThread):
                 model_grid = None
 
             diffraction, truth, voxel_nm = load_input(
-                p['input_path'],
-                target_size=model_grid if model_grid else p.get('grid_size', 64),
+                p["input_path"],
+                target_size=model_grid if model_grid else p.get("grid_size", 64),
             )
             N_in = diffraction.shape[0]
             if voxel_nm is not None:
-                self.log.emit(f"Input voxel pitch: {np.asarray(voxel_nm).mean():.3f} nm/voxel")
+                self.log.emit(
+                    f"Input voxel pitch: {np.asarray(voxel_nm).mean():.3f} nm/voxel"
+                )
 
             # Only resample when the checkpoint EXPLICITLY says what grid it expects
             if model_grid and N_in != model_grid:
@@ -510,55 +611,63 @@ class ReconstructionWorker(QThread):
                     f"resampling to match"
                 )
                 from scipy.ndimage import zoom
+
                 factor = model_grid / N_in
                 diffraction = zoom(diffraction, factor, order=1)
                 if voxel_nm is not None:
                     voxel_nm = np.asarray(voxel_nm) / factor
                 if truth is not None:
-                    truth['phase_true'] = zoom(truth['phase_true'], factor, order=1)
-                    truth['support'] = (zoom(truth['support'].astype(np.float32),
-                                              factor, order=1) > 0.5).astype(np.float32)
+                    truth["phase_true"] = zoom(truth["phase_true"], factor, order=1)
+                    truth["support"] = (
+                        zoom(truth["support"].astype(np.float32), factor, order=1) > 0.5
+                    ).astype(np.float32)
                 self.log.emit(f"Resampled volume: {diffraction.shape}")
             else:
-                self.log.emit(f"Volume: {diffraction.shape}  max={diffraction.max():.2e}")
+                self.log.emit(
+                    f"Volume: {diffraction.shape}  max={diffraction.max():.2e}"
+                )
 
             self.progress.emit(15)
 
-            mode = p['mode']
-            if mode == 'nn_only':
+            mode = p["mode"]
+            if mode == "nn_only":
                 self.log.emit("AutoPhaseNet forward pass (no refinement)...")
                 result = nn_only_infer(
-                    diffraction, p['model_path'],
-                    base_channels=p.get('base_channels', 32),
-                    support_threshold=p.get('support_threshold', 0.05),
+                    diffraction,
+                    p["model_path"],
+                    base_channels=p.get("base_channels", 32),
+                    support_threshold=p.get("support_threshold", 0.05),
                 )
-            elif mode == 'refined':
-                n_hio = p.get('n_hio', 50)
+            elif mode == "refined":
+                n_hio = p.get("n_hio", 50)
                 self.log.emit(
                     f"AutoPhaseNet \u2192 HIO({n_hio}) \u2192 RAAR({p['n_raar']}) \u2192 ER({p['n_er']})..."
                 )
                 result = refined_infer(
-                    diffraction, p['model_path'],
-                    base_channels=p.get('base_channels', 32),
-                    n_raar=p['n_raar'], n_er=p['n_er'], n_hio=n_hio,
-                    support_threshold=p.get('support_threshold', 0.05),
+                    diffraction,
+                    p["model_path"],
+                    base_channels=p.get("base_channels", 32),
+                    n_raar=p["n_raar"],
+                    n_er=p["n_er"],
+                    n_hio=n_hio,
+                    support_threshold=p.get("support_threshold", 0.05),
                 )
-            elif mode in ('ensemble', 'ensemble+refine'):
-                m2 = p.get('model_path2')
+            elif mode in ("ensemble", "ensemble+refine"):
+                m2 = p.get("model_path2")
                 if not m2:
                     raise RuntimeError("Ensemble mode requires Model 2 path")
-                self.log.emit(f"Running ensemble (AutoPhaseNet + supervised)...")
-                refine = (mode == 'ensemble+refine')
+                self.log.emit("Running ensemble (AutoPhaseNet + supervised)...")
+                refine = mode == "ensemble+refine"
                 result = ensemble_infer(
                     diffraction,
-                    autophase_model=p['model_path'],
+                    autophase_model=p["model_path"],
                     supervised_model=m2,
-                    base_channels_autophase=p.get('base_channels', 32),
-                    base_channels_supervised=p.get('base_channels', 32),
+                    base_channels_autophase=p.get("base_channels", 32),
+                    base_channels_supervised=p.get("base_channels", 32),
                     refine=refine,
-                    n_hio=p.get('n_hio', 50),
-                    n_raar=p['n_raar'],
-                    n_er=p['n_er'],
+                    n_hio=p.get("n_hio", 50),
+                    n_raar=p["n_raar"],
+                    n_er=p["n_er"],
                 )
             else:
                 raise RuntimeError(f"Unknown mode: {mode}")
@@ -566,19 +675,19 @@ class ReconstructionWorker(QThread):
 
             # Build output dict
             out = {
-                'object_3d': result.object_3d,
-                'amplitude': result.amplitude,
-                'phase': result.phase,
-                'support': result.support,
-                'error_metric': result.error_metric,
-                'method': result.method,
-                'elapsed': result.elapsed_seconds,
-                'diffraction': diffraction,
-                'voxel_size_nm': voxel_nm,  # may be None for experimental data
+                "object_3d": result.object_3d,
+                "amplitude": result.amplitude,
+                "phase": result.phase,
+                "support": result.support,
+                "error_metric": result.error_metric,
+                "method": result.method,
+                "elapsed": result.elapsed_seconds,
+                "diffraction": diffraction,
+                "voxel_size_nm": voxel_nm,  # may be None for experimental data
             }
             if truth is not None:
-                out['phase_true'] = truth['phase_true']
-                out['support_true'] = truth['support']
+                out["phase_true"] = truth["phase_true"]
+                out["support_true"] = truth["support"]
 
             self.log.emit(
                 f"Done in {result.elapsed_seconds:.2f}s  "
@@ -589,6 +698,7 @@ class ReconstructionWorker(QThread):
 
         except Exception as e:
             import traceback
+
             self.failed.emit(f"{e}\n{traceback.format_exc()}")
 
 
@@ -596,12 +706,14 @@ class ReconstructionWorker(QThread):
 # TAB 0 (4 in main GUI) — Generate Training Data
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class DataGenWorker(QThread):
     """Background worker for generating training samples."""
+
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
-    sample_ready = pyqtSignal(int, dict)   # sample_id, preview dict
-    finished_all = pyqtSignal(int)         # number of samples generated
+    sample_ready = pyqtSignal(int, dict)  # sample_id, preview dict
+    finished_all = pyqtSignal(int)  # number of samples generated
     failed = pyqtSignal(str)
 
     def __init__(self, params):
@@ -614,39 +726,45 @@ class DataGenWorker(QThread):
 
     def run(self):
         try:
-            from cdi_st.nn_data_generator import generate_single_sample
-            import numpy as np
             from pathlib import Path
 
+            import numpy as np
+
+            from cdi_st.nn_data_generator import generate_single_sample
+
             p = self.p
-            out_dir = Path(p['output_dir'])
+            out_dir = Path(p["output_dir"])
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            n = p['num_samples']
+            n = p["num_samples"]
             generated = 0
             preview_every = max(1, n // 25)  # at most 25 previews shown
 
             self.log.emit(f"Generating {n} samples in {out_dir}")
-            self.log.emit(f"Grid: {p['grid_size']}\u00b3   Material: {p['material'] or 'random'}")
-            if p['vary_size']:
-                self.log.emit(f"Varying particle size: {p['size_min']}-{p['size_max']} supercell mult")
+            self.log.emit(
+                f"Grid: {p['grid_size']}\u00b3   Material: {p['material'] or 'random'}"
+            )
+            if p["vary_size"]:
+                self.log.emit(
+                    f"Varying particle size: {p['size_min']}-{p['size_max']} supercell mult"
+                )
 
             for i in range(n):
                 if self._stopped:
                     self.log.emit("Stopped by user.")
                     break
 
-                rng = np.random.default_rng(p['seed'] + i)
+                rng = np.random.default_rng(p["seed"] + i)
 
                 try:
                     sample = generate_single_sample(
                         sample_id=i,
-                        grid_size=p['grid_size'],
+                        grid_size=p["grid_size"],
                         rng=rng,
-                        add_noise=p['add_noise'],
-                        fixed_material=p['material'] if p['material'] else None,
-                        randomize_dislocation=p.get('randomize_dislocation', True),
-                        randomize_strain=p.get('randomize_strain', True),
+                        add_noise=p["add_noise"],
+                        fixed_material=p["material"] if p["material"] else None,
+                        randomize_dislocation=p.get("randomize_dislocation", True),
+                        randomize_strain=p.get("randomize_strain", True),
                     )
                     if sample is None:
                         continue
@@ -655,28 +773,37 @@ class DataGenWorker(QThread):
                     fpath = out_dir / f"sample_{i:05d}.npz"
                     np.savez_compressed(
                         fpath,
-                        amplitude=sample['amplitude'],
-                        phase_true=sample['phase_true'],
-                        support=sample['support'],
-                        diffraction=sample['diffraction'],
+                        amplitude=sample["amplitude"],
+                        phase_true=sample["phase_true"],
+                        support=sample["support"],
+                        diffraction=sample["diffraction"],
                     )
                     generated += 1
 
                     # Emit preview every N samples
                     if i % preview_every == 0 or i == n - 1:
-                        m = sample['metadata']
+                        m = sample["metadata"]
                         # Build a small preview dict (avoid emitting big arrays often)
                         preview = {
-                            'sample_id': i,
-                            'support_slice': sample['support'][:, :, sample['support'].shape[2] // 2].copy(),
-                            'phase_slice': sample['phase_true'][:, :, sample['phase_true'].shape[2] // 2].copy(),
-                            'diff_slice': np.log10(sample['diffraction'][:, :, sample['diffraction'].shape[2] // 2] + 1).copy(),
-                            'meta': m,
+                            "sample_id": i,
+                            "support_slice": sample["support"][
+                                :, :, sample["support"].shape[2] // 2
+                            ].copy(),
+                            "phase_slice": sample["phase_true"][
+                                :, :, sample["phase_true"].shape[2] // 2
+                            ].copy(),
+                            "diff_slice": np.log10(
+                                sample["diffraction"][
+                                    :, :, sample["diffraction"].shape[2] // 2
+                                ]
+                                + 1
+                            ).copy(),
+                            "meta": m,
                         }
                         self.sample_ready.emit(i, preview)
 
                     if (i + 1) % 5 == 0 or i == n - 1:
-                        m = sample['metadata']
+                        m = sample["metadata"]
                         self.log.emit(
                             f"  [{generated}/{n}] {m['material']} {m['shape']} "
                             f"hkl={m['hkl']} strain={m['strain_type']}"
@@ -691,6 +818,7 @@ class DataGenWorker(QThread):
 
         except Exception as e:
             import traceback
+
             self.failed.emit(f"{e}\n{traceback.format_exc()}")
 
 
@@ -761,7 +889,9 @@ class T_Gen(QWidget):
         self.grid_size.setRange(16, 256)
         self.grid_size.setValue(64)
         self.grid_size.setSingleStep(16)
-        self.grid_size.setToolTip("Detector grid size N → diffraction volume is N\u00b3")
+        self.grid_size.setToolTip(
+            "Detector grid size N → diffraction volume is N\u00b3"
+        )
         qf.addRow("Grid size:", self.grid_size)
 
         self.seed_spin = QSpinBox()
@@ -779,6 +909,7 @@ class T_Gen(QWidget):
         self.material_combo.addItem("(random — all materials)")
         try:
             from cdi_st.bcdi_core import MATERIAL_PRESETS
+
             for name in sorted(MATERIAL_PRESETS.keys()):
                 self.material_combo.addItem(name)
         except ImportError:
@@ -808,7 +939,9 @@ class T_Gen(QWidget):
         self.size_min = QSpinBox()
         self.size_min.setRange(5, 100)
         self.size_min.setValue(10)
-        self.size_min.setToolTip("Minimum supercell multiplier per axis (smaller = smaller particle)")
+        self.size_min.setToolTip(
+            "Minimum supercell multiplier per axis (smaller = smaller particle)"
+        )
         sf.addRow("Min supercell:", self.size_min)
 
         self.size_max = QSpinBox()
@@ -855,7 +988,9 @@ class T_Gen(QWidget):
 
         # Buttons
         self.gen_btn = QPushButton("\u25b6 Generate Samples")
-        self.gen_btn.setStyleSheet("background:#1f6feb;min-height:36px;font-size:11pt;font-weight:600")
+        self.gen_btn.setStyleSheet(
+            "background:#1f6feb;min-height:36px;font-size:11pt;font-weight:600"
+        )
         self.gen_btn.clicked.connect(self._start_generation)
         ll.addWidget(self.gen_btn)
 
@@ -885,7 +1020,9 @@ class T_Gen(QWidget):
 
         rv.addWidget(QLabel("Live preview (sampled snapshots of generation)"))
         with matplotlib.rc_context(MPL_DARK):
-            self.preview_fig = Figure(figsize=(10, 7), dpi=110, tight_layout=True, facecolor='#0a0d12')
+            self.preview_fig = Figure(
+                figsize=(10, 7), dpi=110, tight_layout=True, facecolor="#0a0d12"
+            )
         self.preview_canvas = FigureCanvas(self.preview_fig)
         self.preview_canvas.setMinimumHeight(380)
         fr = QFrame()
@@ -920,22 +1057,25 @@ class T_Gen(QWidget):
         material_idx = self.material_combo.currentIndex()
         material = None if material_idx == 0 else self.material_combo.currentText()
 
-        if self.size_min.value() >= self.size_max.value() and self.vary_size.isChecked():
+        if (
+            self.size_min.value() >= self.size_max.value()
+            and self.vary_size.isChecked()
+        ):
             QMessageBox.warning(self, "Error", "Min supercell must be < Max supercell.")
             return
 
         params = {
-            'output_dir': out,
-            'num_samples': self.num_samples.value(),
-            'grid_size': self.grid_size.value(),
-            'seed': self.seed_spin.value(),
-            'material': material,
-            'vary_size': self.vary_size.isChecked(),
-            'size_min': self.size_min.value(),
-            'size_max': self.size_max.value(),
-            'add_noise': self.add_noise_check.isChecked(),
-            'randomize_dislocation': self.rand_disloc_check.isChecked(),
-            'randomize_strain': self.rand_strain_check.isChecked(),
+            "output_dir": out,
+            "num_samples": self.num_samples.value(),
+            "grid_size": self.grid_size.value(),
+            "seed": self.seed_spin.value(),
+            "material": material,
+            "vary_size": self.vary_size.isChecked(),
+            "size_min": self.size_min.value(),
+            "size_max": self.size_max.value(),
+            "add_noise": self.add_noise_check.isChecked(),
+            "randomize_dislocation": self.rand_disloc_check.isChecked(),
+            "randomize_strain": self.rand_strain_check.isChecked(),
         }
 
         self._previews = []
@@ -972,13 +1112,20 @@ class T_Gen(QWidget):
 
             if not self._previews:
                 ax = self.preview_fig.add_subplot(111)
-                ax.set_facecolor('#0a0d12')
-                ax.text(0.5, 0.5,
-                        "Click 'Generate Samples' to start.\n\n"
-                        "Generated lattice previews will appear here.",
-                        ha='center', va='center', fontsize=12, color='#8b949e',
-                        transform=ax.transAxes)
-                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_facecolor("#0a0d12")
+                ax.text(
+                    0.5,
+                    0.5,
+                    "Click 'Generate Samples' to start.\n\n"
+                    "Generated lattice previews will appear here.",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color="#8b949e",
+                    transform=ax.transAxes,
+                )
+                ax.set_xticks([])
+                ax.set_yticks([])
                 for spine in ax.spines.values():
                     spine.set_visible(False)
                 self.preview_canvas.draw()
@@ -990,17 +1137,21 @@ class T_Gen(QWidget):
             rows = (n + cols - 1) // cols
             for i, (sid, prev) in enumerate(self._previews):
                 ax = self.preview_fig.add_subplot(rows, cols, i + 1)
-                ax.set_facecolor('#000005')
+                ax.set_facecolor("#000005")
                 # Show the diffraction in log scale (most informative single image)
-                ax.imshow(prev['diff_slice'], cmap='jet', origin='lower', aspect='equal')
-                m = prev['meta']
-                shape = m.get('shape', '?')
-                mat = m.get('material', '?')
-                hkl = m.get('hkl', '?')
-                ax.set_title(f"#{sid}: {mat} {shape}\nhkl={hkl}",
-                             fontsize=7, color='#e6edf3')
+                ax.imshow(
+                    prev["diff_slice"], cmap="jet", origin="lower", aspect="equal"
+                )
+                m = prev["meta"]
+                shape = m.get("shape", "?")
+                mat = m.get("material", "?")
+                hkl = m.get("hkl", "?")
+                ax.set_title(
+                    f"#{sid}: {mat} {shape}\nhkl={hkl}", fontsize=7, color="#e6edf3"
+                )
                 ax.tick_params(labelsize=5)
-                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_xticks([])
+                ax.set_yticks([])
 
         self.preview_canvas.draw()
 
@@ -1020,6 +1171,7 @@ class T_Gen(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — NN Training
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class T4(QWidget):
     """Training tab: data directory, hyperparameters, live training curve."""
@@ -1257,7 +1409,9 @@ class T4(QWidget):
 
         # Launch button
         self.train_btn = QPushButton("Start Training")
-        self.train_btn.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt")
+        self.train_btn.setStyleSheet(
+            "background:#1f6feb;min-height:34px;font-size:11pt"
+        )
         self.train_btn.clicked.connect(self._start_training)
         ll.addWidget(self.train_btn)
 
@@ -1311,10 +1465,14 @@ class T4(QWidget):
             self.data_dir.setText(d)
             npz = len(list(Path(d).glob("sample_*.npz")))
             h5 = len(list(Path(d).glob("*.h5")))
-            self.data_info.setText(f"Found {npz} .npz and {h5} .h5 files ({npz + h5} total)")
+            self.data_info.setText(
+                f"Found {npz} .npz and {h5} .h5 files ({npz + h5} total)"
+            )
 
     def _browse_resume(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Select checkpoint", "", "PyTorch (*.pt)")
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select checkpoint", "", "PyTorch (*.pt)"
+        )
         if f:
             self.resume_path.setText(f)
 
@@ -1330,28 +1488,28 @@ class T4(QWidget):
             return
 
         params = {
-            'data_dir': data_dir,
-            'output_dir': self.out_dir.text().strip(),
-            'epochs': self.epochs_spin.value(),
-            'batch_size': self.batch_spin.value(),
-            'lr': self.lr_spin.value(),
-            'base_channels': self.channels_spin.value(),
-            'grid_size': self.grid_spin.value(),
-            'patience': self.patience_spin.value(),
-            'support_smoothness': self.smooth_spin.value(),
-            'tv_phase': self.tv_spin.value(),
-            'threshold': self.thresh_spin.value(),
-            'enforce_oversampling': self.os_check.isChecked(),
+            "data_dir": data_dir,
+            "output_dir": self.out_dir.text().strip(),
+            "epochs": self.epochs_spin.value(),
+            "batch_size": self.batch_spin.value(),
+            "lr": self.lr_spin.value(),
+            "base_channels": self.channels_spin.value(),
+            "grid_size": self.grid_spin.value(),
+            "patience": self.patience_spin.value(),
+            "support_smoothness": self.smooth_spin.value(),
+            "tv_phase": self.tv_spin.value(),
+            "threshold": self.thresh_spin.value(),
+            "enforce_oversampling": self.os_check.isChecked(),
             # Noise params (applied during dataloader augmentation)
-            'apply_noise': self.noise_check.isChecked(),
-            'noise_poisson': self.noise_poisson.isChecked(),
-            'noise_readout': self.noise_readout.value(),
-            'noise_air': self.noise_airscatter.value(),
-            'noise_dead': self.noise_dead.value(),
+            "apply_noise": self.noise_check.isChecked(),
+            "noise_poisson": self.noise_poisson.isChecked(),
+            "noise_readout": self.noise_readout.value(),
+            "noise_air": self.noise_airscatter.value(),
+            "noise_dead": self.noise_dead.value(),
         }
         resume = self.resume_path.text().strip()
         if resume and os.path.exists(resume):
-            params['resume'] = resume
+            params["resume"] = resume
 
         self._train_losses = []
         self._val_losses = []
@@ -1384,13 +1542,17 @@ class T4(QWidget):
         with matplotlib.rc_context(MPL_DARK):
             self.fig_curve.clear()
             ax = self.fig_curve.add_subplot(111)
-            ax.set_facecolor('#000005')
+            ax.set_facecolor("#000005")
             epochs = range(1, len(self._train_losses) + 1)
-            ax.semilogy(epochs, self._train_losses, color='#3fb950', linewidth=2, label='Train')
-            ax.semilogy(epochs, self._val_losses, color='#f0883e', linewidth=2, label='Val')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Loss')
-            ax.set_title('Training curve', fontsize=10)
+            ax.semilogy(
+                epochs, self._train_losses, color="#3fb950", linewidth=2, label="Train"
+            )
+            ax.semilogy(
+                epochs, self._val_losses, color="#f0883e", linewidth=2, label="Val"
+            )
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.set_title("Training curve", fontsize=10)
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.2)
         self.canvas_curve.draw()
@@ -1409,6 +1571,7 @@ class T4(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4_Sup — Supervised PhaseUNet3D Training
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class T4_Sup(QWidget):
     """
@@ -1504,7 +1667,9 @@ class T4_Sup(QWidget):
         self.epochs_spin = QSpinBox()
         self.epochs_spin.setRange(1, 1000)
         self.epochs_spin.setValue(60)
-        self.epochs_spin.setToolTip("Total epochs. 50-100 typical for supervised training.")
+        self.epochs_spin.setToolTip(
+            "Total epochs. 50-100 typical for supervised training."
+        )
         hf.addRow("Epochs:", self.epochs_spin)
 
         self.batch_spin = QSpinBox()
@@ -1588,7 +1753,9 @@ class T4_Sup(QWidget):
 
         # Buttons
         self.train_btn = QPushButton("Start Supervised Training")
-        self.train_btn.setStyleSheet("background:#bf8700;min-height:34px;font-size:11pt;font-weight:600")
+        self.train_btn.setStyleSheet(
+            "background:#bf8700;min-height:34px;font-size:11pt;font-weight:600"
+        )
         self.train_btn.clicked.connect(self._start_training)
         ll.addWidget(self.train_btn)
 
@@ -1643,16 +1810,22 @@ class T4_Sup(QWidget):
                 # Verify ground truth keys
                 try:
                     test = np.load(files[0])
-                    has_truth = ('phase_true' in test and 'support' in test)
+                    has_truth = "phase_true" in test and "support" in test
                 except Exception:
                     has_truth = False
-                status = "\u2713 ground truth found" if has_truth else "\u2717 missing phase_true/support"
+                status = (
+                    "\u2713 ground truth found"
+                    if has_truth
+                    else "\u2717 missing phase_true/support"
+                )
                 self.data_info.setText(f"Found {len(files)} .npz files \u2014 {status}")
             else:
                 self.data_info.setText("No sample_*.npz files found")
 
     def _browse_resume(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Select checkpoint", "", "PyTorch (*.pt)")
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select checkpoint", "", "PyTorch (*.pt)"
+        )
         if f:
             self.resume_path.setText(f)
 
@@ -1668,21 +1841,21 @@ class T4_Sup(QWidget):
             return
 
         params = {
-            'data_dir': data_dir,
-            'output_dir': self.out_dir.text().strip(),
-            'epochs': self.epochs_spin.value(),
-            'batch_size': self.batch_spin.value(),
-            'lr': self.lr_spin.value(),
-            'base_channels': self.channels_spin.value(),
-            'grid_size': self.grid_spin.value(),
-            'patience': self.patience_spin.value(),
-            'alpha_amp': self.alpha_spin.value(),
-            'beta_phase': self.beta_spin.value(),
-            'gamma_diff': self.gamma_spin.value(),
+            "data_dir": data_dir,
+            "output_dir": self.out_dir.text().strip(),
+            "epochs": self.epochs_spin.value(),
+            "batch_size": self.batch_spin.value(),
+            "lr": self.lr_spin.value(),
+            "base_channels": self.channels_spin.value(),
+            "grid_size": self.grid_spin.value(),
+            "patience": self.patience_spin.value(),
+            "alpha_amp": self.alpha_spin.value(),
+            "beta_phase": self.beta_spin.value(),
+            "gamma_diff": self.gamma_spin.value(),
         }
         resume = self.resume_path.text().strip()
         if resume and os.path.exists(resume):
-            params['resume'] = resume
+            params["resume"] = resume
 
         self._train_losses = []
         self._val_losses = []
@@ -1715,20 +1888,26 @@ class T4_Sup(QWidget):
         with matplotlib.rc_context(MPL_DARK):
             self.fig_curve.clear()
             ax = self.fig_curve.add_subplot(111)
-            ax.set_facecolor('#000005')
+            ax.set_facecolor("#000005")
             epochs = range(1, len(self._train_losses) + 1)
-            ax.semilogy(epochs, self._train_losses, color='#3fb950', linewidth=2, label='Train')
-            ax.semilogy(epochs, self._val_losses, color='#bf8700', linewidth=2, label='Val')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Loss')
-            ax.set_title('Supervised training curve', fontsize=10)
+            ax.semilogy(
+                epochs, self._train_losses, color="#3fb950", linewidth=2, label="Train"
+            )
+            ax.semilogy(
+                epochs, self._val_losses, color="#bf8700", linewidth=2, label="Val"
+            )
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.set_title("Supervised training curve", fontsize=10)
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.2)
         self.canvas_curve.draw()
 
     def _on_finished(self, model_path):
         self.log.appendPlainText(f"\n\u2713 Training complete. Model: {model_path}")
-        self.log.appendPlainText("\nUse this path as 'Model 2' in the Reconstruct tab\nfor ensemble inference.")
+        self.log.appendPlainText(
+            "\nUse this path as 'Model 2' in the Reconstruct tab\nfor ensemble inference."
+        )
         self.train_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
@@ -1741,6 +1920,7 @@ class T4_Sup(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — BCDI Reconstruction
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class T5(QWidget):
     """Reconstruction tab: load data, run NN + refinement, show 4 figures."""
@@ -1770,7 +1950,9 @@ class T5(QWidget):
 
         tg.addWidget(QLabel("Data file:"), 0, 0, Qt.AlignmentFlag.AlignRight)
         self.input_path = QLineEdit()
-        self.input_path.setPlaceholderText(".npz (simulated/preprocessed) or .h5 (experimental)")
+        self.input_path.setPlaceholderText(
+            ".npz (simulated/preprocessed) or .h5 (experimental)"
+        )
         tg.addWidget(self.input_path, 0, 1)
         # Browse + SPEC button row
         ib_row = QHBoxLayout()
@@ -1781,7 +1963,9 @@ class T5(QWidget):
         ib.clicked.connect(self._browse_input)
         ib_row.addWidget(ib)
         spec_btn = QPushButton("SPEC+EDF…")
-        spec_btn.setStyleSheet("background:#bf8700;padding:5px 8px;min-height:20px;font-size:9pt")
+        spec_btn.setStyleSheet(
+            "background:#bf8700;padding:5px 8px;min-height:20px;font-size:9pt"
+        )
         spec_btn.setMaximumWidth(95)
         spec_btn.setToolTip(
             "Convert ID01-style SPEC + EDF data to .npz.\n"
@@ -1810,7 +1994,9 @@ class T5(QWidget):
         # Optional second model for ensemble
         tg.addWidget(QLabel("Model 2 (ensemble):"), 2, 0, Qt.AlignmentFlag.AlignRight)
         self.model_path2 = QLineEdit()
-        self.model_path2.setPlaceholderText("(optional) supervised PhaseUNet3D checkpoint")
+        self.model_path2.setPlaceholderText(
+            "(optional) supervised PhaseUNet3D checkpoint"
+        )
         self.model_path2.setToolTip(
             "Optional 2nd model for ensemble mode.\n"
             "Should be a supervised PhaseUNet3D checkpoint trained on\n"
@@ -1884,7 +2070,9 @@ class T5(QWidget):
         # Launch + progress
         lr = QHBoxLayout()
         self.launch_btn = QPushButton("Launch Reconstruction")
-        self.launch_btn.setStyleSheet("background:#1f6feb;min-height:32px;font-size:10pt;font-weight:600")
+        self.launch_btn.setStyleSheet(
+            "background:#1f6feb;min-height:32px;font-size:10pt;font-weight:600"
+        )
         self.launch_btn.clicked.connect(self._launch)
         lr.addWidget(self.launch_btn)
         self.pg = QProgressBar()
@@ -1904,7 +2092,10 @@ class T5(QWidget):
 
         fig_names = [
             ("Bragg Peak", "Accumulated 2D Bragg peak projections"),
-            ("Density/Phase/Strain", "Electron density, phase and strain along 3 directions"),
+            (
+                "Density/Phase/Strain",
+                "Electron density, phase and strain along 3 directions",
+            ),
             ("Convergence", "Phase retrieval R-factor convergence"),
             ("Ground Truth", "Reconstruction vs ground truth comparison"),
         ]
@@ -1929,8 +2120,12 @@ class T5(QWidget):
                 bar.addWidget(tb)
                 bar.addStretch()
                 exp_btn = QPushButton("Export PNG")
-                exp_btn.setStyleSheet("background:#4f98a3;padding:4px 10px;min-height:20px;font-size:8pt")
-                exp_btn.clicked.connect(lambda _, f=fig, n=tab_name: self._export_fig(f, n))
+                exp_btn.setStyleSheet(
+                    "background:#4f98a3;padding:4px 10px;min-height:20px;font-size:8pt"
+                )
+                exp_btn.clicked.connect(
+                    lambda _, f=fig, n=tab_name: self._export_fig(f, n)
+                )
                 bar.addWidget(exp_btn)
                 pl.addLayout(bar)
                 pl.addWidget(canvas, 1)
@@ -1944,8 +2139,10 @@ class T5(QWidget):
 
     def _browse_input(self):
         f, _ = QFileDialog.getOpenFileName(
-            self, "Select diffraction data", "",
-            "All supported (*.npz *.h5);;NumPy (*.npz);;HDF5 (*.h5)"
+            self,
+            "Select diffraction data",
+            "",
+            "All supported (*.npz *.h5);;NumPy (*.npz);;HDF5 (*.h5)",
         )
         if f:
             self.input_path.setText(f)
@@ -1980,10 +2177,14 @@ class T5(QWidget):
         spec_row.addWidget(spec_le, 1)
         spec_browse = QPushButton("…")
         spec_browse.setMaximumWidth(30)
+
         def _pick_spec():
-            f, _ = QFileDialog.getOpenFileName(self, "Select SPEC file", "", "SPEC (*.spec);;All files (*)")
+            f, _ = QFileDialog.getOpenFileName(
+                self, "Select SPEC file", "", "SPEC (*.spec);;All files (*)"
+            )
             if f:
                 spec_le.setText(f)
+
         spec_browse.clicked.connect(_pick_spec)
         spec_row.addWidget(spec_browse)
         spec_widget = QWidget()
@@ -2003,10 +2204,12 @@ class T5(QWidget):
         edf_row.addWidget(edf_le, 1)
         edf_browse = QPushButton("…")
         edf_browse.setMaximumWidth(30)
+
         def _pick_edf():
             d = QFileDialog.getExistingDirectory(self, "Select EDF directory")
             if d:
                 edf_le.setText(d)
+
         edf_browse.clicked.connect(_pick_edf)
         edf_row.addWidget(edf_browse)
         edf_widget = QWidget()
@@ -2040,10 +2243,14 @@ class T5(QWidget):
         out_row.addWidget(out_le, 1)
         out_browse = QPushButton("…")
         out_browse.setMaximumWidth(30)
+
         def _pick_out():
-            f, _ = QFileDialog.getSaveFileName(self, "Save converted .npz", "scan.npz", "NumPy (*.npz)")
+            f, _ = QFileDialog.getSaveFileName(
+                self, "Save converted .npz", "scan.npz", "NumPy (*.npz)"
+            )
             if f:
                 out_le.setText(f)
+
         out_browse.clicked.connect(_pick_out)
         out_row.addWidget(out_browse)
         out_widget = QWidget()
@@ -2074,17 +2281,23 @@ class T5(QWidget):
             edf_dir = edf_le.text().strip()
             out_path = out_le.text().strip()
             if not all([spec_path, edf_dir, out_path]):
-                status.setText("<span style='color:#da3633'>All paths are required.</span>")
+                status.setText(
+                    "<span style='color:#da3633'>All paths are required.</span>"
+                )
                 return
             if not os.path.exists(spec_path):
-                status.setText(f"<span style='color:#da3633'>SPEC file not found: {spec_path}</span>")
+                status.setText(
+                    f"<span style='color:#da3633'>SPEC file not found: {spec_path}</span>"
+                )
                 return
             if not os.path.isdir(edf_dir):
-                status.setText(f"<span style='color:#da3633'>EDF directory not found: {edf_dir}</span>")
+                status.setText(
+                    f"<span style='color:#da3633'>EDF directory not found: {edf_dir}</span>"
+                )
                 return
 
             det_str = det_combo.currentText().split()[0]
-            det_shape = (516, 516) if det_str == 'maxipix' else (1062, 1028)
+            det_shape = (516, 516) if det_str == "maxipix" else (1062, 1028)
 
             convert_btn.setEnabled(False)
             status.setText("Converting… (this may take 10-60 seconds)")
@@ -2092,6 +2305,7 @@ class T5(QWidget):
 
             try:
                 from cdi_st.nn_experimental_loader import spec_edf_to_npz
+
                 result = spec_edf_to_npz(
                     spec_path=spec_path,
                     scan_number=scan_spin.value(),
@@ -2113,6 +2327,7 @@ class T5(QWidget):
                 cancel_btn.setText("Close")
             except Exception as e:
                 import traceback
+
                 status.setText(
                     f"<span style='color:#da3633'>\u2717 Conversion failed:</span><br>"
                     f"<span style='font-size:9pt'>{e}</span>"
@@ -2125,12 +2340,16 @@ class T5(QWidget):
         dlg.exec()
 
     def _browse_model(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Select AutoPhaseNet model", "", "PyTorch (*.pt)")
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select AutoPhaseNet model", "", "PyTorch (*.pt)"
+        )
         if f:
             self.model_path.setText(f)
 
     def _browse_model2(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Select supervised model", "", "PyTorch (*.pt)")
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select supervised model", "", "PyTorch (*.pt)"
+        )
         if f:
             self.model_path2.setText(f)
 
@@ -2146,24 +2365,25 @@ class T5(QWidget):
         if not model or not os.path.exists(model):
             QMessageBox.warning(self, "Error", "Select a valid AutoPhaseNet checkpoint")
             return
-        if mode in ('ensemble', 'ensemble+refine'):
+        if mode in ("ensemble", "ensemble+refine"):
             if not model2 or not os.path.exists(model2):
                 QMessageBox.warning(
-                    self, "Error",
-                    "Ensemble mode requires Model 2 (supervised PhaseUNet3D checkpoint)."
+                    self,
+                    "Error",
+                    "Ensemble mode requires Model 2 (supervised PhaseUNet3D checkpoint).",
                 )
                 return
 
         params = {
-            'input_path': inp,
-            'model_path': model,
-            'model_path2': model2 if model2 else None,
-            'mode': self.mode_combo.currentText(),
-            'n_raar': self.raar_spin.value(),
-            'n_er': self.er_spin.value(),
-            'n_hio': self.hio_spin.value(),
-            'base_channels': self.ch_spin.value(),
-            'support_threshold': 0.05,
+            "input_path": inp,
+            "model_path": model,
+            "model_path2": model2 if model2 else None,
+            "mode": self.mode_combo.currentText(),
+            "n_raar": self.raar_spin.value(),
+            "n_er": self.er_spin.value(),
+            "n_hio": self.hio_spin.value(),
+            "base_channels": self.ch_spin.value(),
+            "support_threshold": 0.05,
         }
 
         self.launch_btn.setEnabled(False)
@@ -2202,11 +2422,13 @@ class T5(QWidget):
 
     def _export_fig(self, fig, name):
         path, _ = QFileDialog.getSaveFileName(
-            self, f"Export {name}", f"bcdi_{name.lower().replace(' ','_')}.png",
-            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)"
+            self,
+            f"Export {name}",
+            f"bcdi_{name.lower().replace(' ','_')}.png",
+            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)",
         )
         if path:
-            fig.savefig(path, dpi=200, bbox_inches='tight', facecolor='#0d1117')
+            fig.savefig(path, dpi=200, bbox_inches="tight", facecolor="#0d1117")
             self.status_lbl.setText(f"Exported: {path}")
 
     def _draw_all(self, r):
@@ -2217,19 +2439,24 @@ class T5(QWidget):
 
     def _draw_bragg(self, r):
         """Fig 0: Accumulated 2D Bragg peak from the diffraction data."""
-        diff = r['diffraction']
+        diff = r["diffraction"]
         with matplotlib.rc_context(MPL_DARK):
             fig = self.figs[0]
             fig.clear()
             axes = fig.subplots(1, 3)
-            fig.suptitle('Accumulated 2D Bragg peak projections', fontsize=11, color='#4f98a3')
+            fig.suptitle(
+                "Accumulated 2D Bragg peak projections", fontsize=11, color="#4f98a3"
+            )
             proj_xy = np.log10(diff.sum(axis=2).T + 1)
             proj_xz = np.log10(diff.sum(axis=1).T + 1)
             proj_yz = np.log10(diff.sum(axis=0).T + 1)
-            for ax, data, title in zip(axes, [proj_xy, proj_xz, proj_yz],
-                                        ['Σ along z (qx-qy)', 'Σ along y (qx-qz)', 'Σ along x (qy-qz)']):
-                ax.set_facecolor('#000005')
-                im = ax.imshow(data, cmap='jet', origin='lower', aspect='equal')
+            for ax, data, title in zip(
+                axes,
+                [proj_xy, proj_xz, proj_yz],
+                ["Σ along z (qx-qy)", "Σ along y (qx-qz)", "Σ along x (qy-qz)"],
+            ):
+                ax.set_facecolor("#000005")
+                im = ax.imshow(data, cmap="jet", origin="lower", aspect="equal")
                 ax.set_title(title, fontsize=9)
                 ax.tick_params(labelsize=7)
                 fig.colorbar(im, ax=ax, shrink=0.7)
@@ -2237,18 +2464,19 @@ class T5(QWidget):
 
     def _draw_density_phase(self, r):
         """Fig 1: Electron density, phase, strain along 3 orthogonal slices."""
-        amp = r['amplitude']
-        support = r['support']
-        phase = self._remove_phase_offset(r['phase'], support)
+        amp = r["amplitude"]
+        support = r["support"]
+        phase = self._remove_phase_offset(r["phase"], support)
         N = amp.shape[0]
 
         # Slice through the center-of-mass of the support, NOT the geometric
         # center of the volume. Phase retrieval has translation freedom, so
         # the object can sit anywhere in the volume. Slicing at N//2 may miss
         # it entirely. Slicing at the COM always shows the object's middle.
-        sup_mask = (support > 0.5)
+        sup_mask = support > 0.5
         if sup_mask.sum() > 5:
             from scipy.ndimage import center_of_mass
+
             com = center_of_mass(amp * sup_mask)
             cx, cy, cz = (int(round(com[0])), int(round(com[1])), int(round(com[2])))
             cx = max(0, min(N - 1, cx))
@@ -2261,26 +2489,33 @@ class T5(QWidget):
             fig = self.figs[1]
             fig.clear()
             fig.suptitle(
-                f'Electron density | Phase | Strain  (slices at COM = ({cx}, {cy}, {cz}))',
-                fontsize=11, color='#4f98a3'
+                f"Electron density | Phase | Strain  (slices at COM = ({cx}, {cy}, {cz}))",
+                fontsize=11,
+                color="#4f98a3",
             )
             axes = fig.subplots(3, 3)
 
             slicers = [
-                ('XY', lambda a: a[:, :, cz]),
-                ('XZ', lambda a: a[:, cy, :]),
-                ('YZ', lambda a: a[cx, :, :]),
+                ("XY", lambda a: a[:, :, cz]),
+                ("XZ", lambda a: a[:, cy, :]),
+                ("YZ", lambda a: a[cx, :, :]),
             ]
 
             # Row 0: amplitude (auto-scale to data range)
             amp_max = amp.max()
             for col, (name, getter) in enumerate(slicers):
                 ax = axes[0, col]
-                ax.set_facecolor('#000005')
+                ax.set_facecolor("#000005")
                 sl = getter(amp)
-                im = ax.imshow(sl, cmap='hot', origin='lower', aspect='equal',
-                               vmin=0, vmax=amp_max if amp_max > 0 else 1)
-                ax.set_title(f'|ρ| {name}', fontsize=9, color='#e6edf3')
+                im = ax.imshow(
+                    sl,
+                    cmap="hot",
+                    origin="lower",
+                    aspect="equal",
+                    vmin=0,
+                    vmax=amp_max if amp_max > 0 else 1,
+                )
+                ax.set_title(f"|ρ| {name}", fontsize=9, color="#e6edf3")
                 ax.tick_params(labelsize=6)
                 if col == 2:
                     fig.colorbar(im, ax=ax, shrink=0.7)
@@ -2288,30 +2523,44 @@ class T5(QWidget):
             # Row 1: phase (masked to support, full [-π, π] range)
             for col, (name, getter) in enumerate(slicers):
                 ax = axes[1, col]
-                ax.set_facecolor('#000005')
+                ax.set_facecolor("#000005")
                 sup_sl = getter(support) > 0.5
                 sl = getter(phase) * sup_sl
-                im = ax.imshow(sl, cmap='twilight', vmin=-np.pi, vmax=np.pi,
-                               origin='lower', aspect='equal')
-                ax.set_title(f'φ {name}', fontsize=9, color='#e6edf3')
+                im = ax.imshow(
+                    sl,
+                    cmap="twilight",
+                    vmin=-np.pi,
+                    vmax=np.pi,
+                    origin="lower",
+                    aspect="equal",
+                )
+                ax.set_title(f"φ {name}", fontsize=9, color="#e6edf3")
                 ax.tick_params(labelsize=6)
                 if col == 2:
                     cb = fig.colorbar(im, ax=ax, shrink=0.7)
                     cb.set_ticks([-np.pi, 0, np.pi])
-                    cb.set_ticklabels(['-π', '0', 'π'])
+                    cb.set_ticklabels(["-π", "0", "π"])
 
             # Row 2: strain magnitude (gradient of phase inside support)
             for col, (name, getter) in enumerate(slicers):
                 ax = axes[2, col]
-                ax.set_facecolor('#000005')
+                ax.set_facecolor("#000005")
                 sup_sl = getter(support) > 0.5
                 ph_slice = getter(phase) * sup_sl
                 grad_x, grad_y = np.gradient(ph_slice)
                 strain_mag = np.sqrt(grad_x**2 + grad_y**2) * sup_sl
-                vmax_s = np.percentile(strain_mag[sup_sl], 95) if sup_sl.sum() > 10 else 1
-                im = ax.imshow(strain_mag, cmap='inferno', origin='lower', aspect='equal',
-                               vmin=0, vmax=max(vmax_s, 1e-6))
-                ax.set_title(f'|∇φ| {name}', fontsize=9, color='#e6edf3')
+                vmax_s = (
+                    np.percentile(strain_mag[sup_sl], 95) if sup_sl.sum() > 10 else 1
+                )
+                im = ax.imshow(
+                    strain_mag,
+                    cmap="inferno",
+                    origin="lower",
+                    aspect="equal",
+                    vmin=0,
+                    vmax=max(vmax_s, 1e-6),
+                )
+                ax.set_title(f"|∇φ| {name}", fontsize=9, color="#e6edf3")
                 ax.tick_params(labelsize=6)
                 if col == 2:
                     fig.colorbar(im, ax=ax, shrink=0.7)
@@ -2320,42 +2569,69 @@ class T5(QWidget):
 
     def _draw_convergence(self, r):
         """Fig 2: R-factor convergence."""
-        errors = np.asarray(r['error_metric'])
-        method = r.get('method', '')
+        errors = np.asarray(r["error_metric"])
+        method = r.get("method", "")
         with matplotlib.rc_context(MPL_DARK):
             fig = self.figs[2]
             fig.clear()
             ax = fig.add_subplot(111)
-            ax.set_facecolor('#000005')
+            ax.set_facecolor("#000005")
 
             if len(errors) > 1:
-                ax.semilogy(errors, color='#3fb950', linewidth=2, label='R-factor')
-                ax.axhline(errors[-1], color='#f0883e', linestyle='--', alpha=0.7,
-                           label=f'Final R={errors[-1]:.4f}')
-                ax.set_xlabel('Iteration', fontsize=10)
-                ax.set_ylabel('R-factor (log scale)', fontsize=10)
+                ax.semilogy(errors, color="#3fb950", linewidth=2, label="R-factor")
+                ax.axhline(
+                    errors[-1],
+                    color="#f0883e",
+                    linestyle="--",
+                    alpha=0.7,
+                    label=f"Final R={errors[-1]:.4f}",
+                )
+                ax.set_xlabel("Iteration", fontsize=10)
+                ax.set_ylabel("R-factor (log scale)", fontsize=10)
             else:
                 # Single point — display as a clear annotated value, not a bar
-                ax.text(0.5, 0.55,
-                        f"R = {errors[0]:.4f}",
-                        ha='center', va='center', fontsize=32, color='#3fb950',
-                        fontweight='bold', transform=ax.transAxes)
-                ax.text(0.5, 0.30,
-                        f"NN-only mode (no iterative refinement)",
-                        ha='center', va='center', fontsize=11, color='#8b949e',
-                        transform=ax.transAxes)
-                ax.text(0.5, 0.20,
-                        f"Method: {method}",
-                        ha='center', va='center', fontsize=9, color='#8b949e',
-                        transform=ax.transAxes)
-                ax.set_xticks([]); ax.set_yticks([])
+                ax.text(
+                    0.5,
+                    0.55,
+                    f"R = {errors[0]:.4f}",
+                    ha="center",
+                    va="center",
+                    fontsize=32,
+                    color="#3fb950",
+                    fontweight="bold",
+                    transform=ax.transAxes,
+                )
+                ax.text(
+                    0.5,
+                    0.30,
+                    "NN-only mode (no iterative refinement)",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="#8b949e",
+                    transform=ax.transAxes,
+                )
+                ax.text(
+                    0.5,
+                    0.20,
+                    f"Method: {method}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#8b949e",
+                    transform=ax.transAxes,
+                )
+                ax.set_xticks([])
+                ax.set_yticks([])
                 for spine in ax.spines.values():
                     spine.set_visible(False)
-                ax.set_title('Phase retrieval convergence', fontsize=11, color='#4f98a3')
+                ax.set_title(
+                    "Phase retrieval convergence", fontsize=11, color="#4f98a3"
+                )
                 self.canvases[2].draw()
                 return
 
-            ax.set_title('Phase retrieval convergence', fontsize=11, color='#4f98a3')
+            ax.set_title("Phase retrieval convergence", fontsize=11, color="#4f98a3")
             ax.grid(True, alpha=0.2)
             ax.legend(fontsize=9)
         self.canvases[2].draw()
@@ -2366,86 +2642,113 @@ class T5(QWidget):
             fig = self.figs[3]
             fig.clear()
 
-            if 'phase_true' not in r:
+            if "phase_true" not in r:
                 ax = fig.add_subplot(111)
-                ax.set_facecolor('#000005')
-                ax.text(0.5, 0.5,
-                        'No ground truth available\n\n'
-                        'This is experimental data — ground truth\n'
-                        'phase is unknown. Check diffraction match\n'
-                        'in the Bragg Peak tab instead.',
-                        ha='center', va='center', fontsize=12, color='#8b949e',
-                        transform=ax.transAxes)
-                ax.set_title('Ground truth comparison', fontsize=11, color='#4f98a3')
+                ax.set_facecolor("#000005")
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No ground truth available\n\n"
+                    "This is experimental data — ground truth\n"
+                    "phase is unknown. Check diffraction match\n"
+                    "in the Bragg Peak tab instead.",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color="#8b949e",
+                    transform=ax.transAxes,
+                )
+                ax.set_title("Ground truth comparison", fontsize=11, color="#4f98a3")
                 self.canvases[3].draw()
                 return
 
-            support = r['support']
-            phase_recon = self._remove_phase_offset(r['phase'], support)
-            sup_true = r.get('support_true', support)
-            phase_true = self._remove_phase_offset(r['phase_true'], sup_true)
+            support = r["support"]
+            phase_recon = self._remove_phase_offset(r["phase"], support)
+            sup_true = r.get("support_true", support)
+            phase_true = self._remove_phase_offset(r["phase_true"], sup_true)
 
             N = phase_recon.shape[0]
             # Slice through the COM of the reconstruction (not the geometric
             # center). Same reasoning as in _draw_density_phase.
-            sup_mask_full = (support > 0.5)
+            sup_mask_full = support > 0.5
             if sup_mask_full.sum() > 5:
                 from scipy.ndimage import center_of_mass
-                com = center_of_mass(r['amplitude'] * sup_mask_full)
+
+                com = center_of_mass(r["amplitude"] * sup_mask_full)
                 c = max(0, min(N - 1, int(round(com[2]))))
             else:
                 c = N // 2
-            kw = dict(cmap='twilight', vmin=-np.pi, vmax=np.pi,
-                      origin='lower', aspect='equal')
+            kw = dict(
+                cmap="twilight", vmin=-np.pi, vmax=np.pi, origin="lower", aspect="equal"
+            )
 
             axes = fig.subplots(2, 3)
-            fig.suptitle('Reconstruction vs Ground Truth', fontsize=11, color='#4f98a3')
+            fig.suptitle("Reconstruction vs Ground Truth", fontsize=11, color="#4f98a3")
 
             # Row 0: phase comparison
             pt = phase_true[:, :, c] * (sup_true[:, :, c] > 0.5)
             pr = phase_recon[:, :, c] * (support[:, :, c] > 0.5)
             common = (support[:, :, c] > 0.5) & (sup_true[:, :, c] > 0.5)
-            pe = np.angle(np.exp(1j * (phase_recon[:, :, c] - phase_true[:, :, c]))) * common
+            pe = (
+                np.angle(np.exp(1j * (phase_recon[:, :, c] - phase_true[:, :, c])))
+                * common
+            )
 
-            for ax, data, title in zip(axes[0], [pt, pr, pe],
-                                        ['Ground truth φ', 'Reconstructed φ', 'Phase error']):
-                ax.set_facecolor('#000005')
+            for ax, data, title in zip(
+                axes[0],
+                [pt, pr, pe],
+                ["Ground truth φ", "Reconstructed φ", "Phase error"],
+            ):
+                ax.set_facecolor("#000005")
                 im = ax.imshow(data, **kw)
-                ax.set_title(title, fontsize=9, color='#e6edf3')
+                ax.set_title(title, fontsize=9, color="#e6edf3")
                 ax.tick_params(labelsize=6)
             cb = fig.colorbar(im, ax=axes[0].tolist(), shrink=0.7)
             cb.set_ticks([-np.pi, 0, np.pi])
-            cb.set_ticklabels(['-π', '0', 'π'])
+            cb.set_ticklabels(["-π", "0", "π"])
 
             # Row 1: amplitude comparison
             amp_true_sl = sup_true[:, :, c].astype(np.float32)
-            amp_recon_sl = r['amplitude'][:, :, c]
+            amp_recon_sl = r["amplitude"][:, :, c]
             amp_diff = np.abs(amp_recon_sl - amp_true_sl)
             vmax_a = max(amp_true_sl.max(), amp_recon_sl.max(), 1e-6)
-            kw_a = dict(cmap='hot', vmin=0, vmax=vmax_a, origin='lower', aspect='equal')
+            kw_a = dict(cmap="hot", vmin=0, vmax=vmax_a, origin="lower", aspect="equal")
 
-            for ax, data, title in zip(axes[1], [amp_true_sl, amp_recon_sl, amp_diff],
-                                        ['Support (truth)', 'Reconstructed |ρ|', '|ρ| difference']):
-                ax.set_facecolor('#000005')
+            for ax, data, title in zip(
+                axes[1],
+                [amp_true_sl, amp_recon_sl, amp_diff],
+                ["Support (truth)", "Reconstructed |ρ|", "|ρ| difference"],
+            ):
+                ax.set_facecolor("#000005")
                 ax.imshow(data, **kw_a)
-                ax.set_title(title, fontsize=9, color='#e6edf3')
+                ax.set_title(title, fontsize=9, color="#e6edf3")
                 ax.tick_params(labelsize=6)
 
             # Metrics
             mask3d = (support > 0.5) & (sup_true > 0.5)
             if mask3d.sum() > 10:
                 perr = np.angle(np.exp(1j * (phase_recon - phase_true)))
-                rmse = np.sqrt(np.mean(perr[mask3d]**2))
+                rmse = np.sqrt(np.mean(perr[mask3d] ** 2))
                 pt_vals = phase_true[mask3d]
                 if pt_vals.std() > 1e-6:
                     corr = np.corrcoef(phase_recon[mask3d], pt_vals)[0, 1]
-                    fig.text(0.5, 0.01,
-                             f'Phase RMSE = {rmse:.3f} rad    Correlation = {corr:.3f}',
-                             ha='center', fontsize=10, color='#3fb950')
+                    fig.text(
+                        0.5,
+                        0.01,
+                        f"Phase RMSE = {rmse:.3f} rad    Correlation = {corr:.3f}",
+                        ha="center",
+                        fontsize=10,
+                        color="#3fb950",
+                    )
                 else:
-                    fig.text(0.5, 0.01,
-                             f'Phase RMSE = {rmse:.3f} rad    (constant GT phase — no strain)',
-                             ha='center', fontsize=10, color='#f0883e')
+                    fig.text(
+                        0.5,
+                        0.01,
+                        f"Phase RMSE = {rmse:.3f} rad    (constant GT phase — no strain)",
+                        ha="center",
+                        fontsize=10,
+                        color="#f0883e",
+                    )
 
         self.canvases[3].draw()
 
@@ -2453,6 +2756,7 @@ class T5(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — 3D Reconstruction Viewer (matplotlib-based, no CDN required)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class T6(QWidget):
     """3D interactive viewer using matplotlib (no Three.js dependency)."""
@@ -2497,7 +2801,9 @@ class T6(QWidget):
         cv.addWidget(self.view_btn)
 
         self.update_btn = QPushButton("⟳ Update view")
-        self.update_btn.setStyleSheet("background:#4f98a3;min-height:26px;font-size:9pt")
+        self.update_btn.setStyleSheet(
+            "background:#4f98a3;min-height:26px;font-size:9pt"
+        )
         self.update_btn.setEnabled(False)
         self.update_btn.setToolTip("Re-render after changing display settings")
         self.update_btn.clicked.connect(self._render_now)
@@ -2521,11 +2827,13 @@ class T6(QWidget):
         rg = QGroupBox("Render style")
         rgv = QVBoxLayout(rg)
         self.render_combo = QComboBox()
-        self.render_combo.addItems([
-            "Point cloud (fast, voxels)",
-            "Isosurface (smooth, ParaView-like)",
-            "Surface only (no interior)",
-        ])
+        self.render_combo.addItems(
+            [
+                "Point cloud (fast, voxels)",
+                "Isosurface (smooth, ParaView-like)",
+                "Surface only (no interior)",
+            ]
+        )
         self.render_combo.setToolTip(
             "How to render the 3D object:\n"
             "• Point cloud: every voxel as a colored sphere (fast, but messy)\n"
@@ -2540,7 +2848,9 @@ class T6(QWidget):
         vg = QGroupBox("Export to ParaView")
         vv = QVBoxLayout(vg)
         self.vti_btn = QPushButton("Export VTI / VTK file…")
-        self.vti_btn.setStyleSheet("background:#bf8700;padding:6px 10px;min-height:26px;font-size:9pt")
+        self.vti_btn.setStyleSheet(
+            "background:#bf8700;padding:6px 10px;min-height:26px;font-size:9pt"
+        )
         self.vti_btn.setEnabled(False)
         self.vti_btn.setToolTip(
             "Save reconstruction as a .vti (VTK image) file.\n"
@@ -2550,7 +2860,9 @@ class T6(QWidget):
         )
         self.vti_btn.clicked.connect(self._export_vti)
         vv.addWidget(self.vti_btn)
-        info = QLabel("VTI files contain |ρ|, φ, and strain as scalar fields\nwith proper voxel-pitch metadata in nm.")
+        info = QLabel(
+            "VTI files contain |ρ|, φ, and strain as scalar fields\nwith proper voxel-pitch metadata in nm."
+        )
         info.setStyleSheet("color:#6e7681;font-size:8pt;font-style:italic")
         info.setWordWrap(True)
         vv.addWidget(info)
@@ -2609,7 +2921,9 @@ class T6(QWidget):
         cg = QGroupBox("Colormap")
         cv2 = QVBoxLayout(cg)
         self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems(["twilight", "hot", "inferno", "viridis", "jet", "coolwarm", "plasma"])
+        self.cmap_combo.addItems(
+            ["twilight", "hot", "inferno", "viridis", "jet", "coolwarm", "plasma"]
+        )
         self.cmap_combo.setToolTip(
             "Color scheme. 'twilight' is best for phase\n"
             "(diverging through zero); 'hot'/'inferno' for amplitude;\n"
@@ -2682,11 +2996,13 @@ class T6(QWidget):
         plane_lbl.setStyleSheet("color:#8b949e;font-size:9pt;margin-top:4px")
         clv.addWidget(plane_lbl)
         self.clip_axis_combo = QComboBox()
-        self.clip_axis_combo.addItems([
-            "X axis  (cuts in YZ plane)",
-            "Y axis  (cuts in XZ plane)",
-            "Z axis  (cuts in XY plane)",
-        ])
+        self.clip_axis_combo.addItems(
+            [
+                "X axis  (cuts in YZ plane)",
+                "Y axis  (cuts in XZ plane)",
+                "Z axis  (cuts in XY plane)",
+            ]
+        )
         self.clip_axis_combo.setCurrentIndex(2)
         self.clip_axis_combo.setMinimumHeight(28)
         self.clip_axis_combo.setToolTip(
@@ -2702,10 +3018,12 @@ class T6(QWidget):
         dir_lbl.setStyleSheet("color:#8b949e;font-size:9pt;margin-top:4px")
         clv.addWidget(dir_lbl)
         self.clip_dir_combo = QComboBox()
-        self.clip_dir_combo.addItems([
-            "below the plane",
-            "above the plane",
-        ])
+        self.clip_dir_combo.addItems(
+            [
+                "below the plane",
+                "above the plane",
+            ]
+        )
         self.clip_dir_combo.setMinimumHeight(28)
         self.clip_dir_combo.setToolTip(
             "Which side of the cut plane to keep visible.\n"
@@ -2743,7 +3061,9 @@ class T6(QWidget):
 
         # Export button
         self.export_btn = QPushButton("Export PNG")
-        self.export_btn.setStyleSheet("background:#4f98a3;padding:5px 10px;min-height:24px;font-size:9pt")
+        self.export_btn.setStyleSheet(
+            "background:#4f98a3;padding:5px 10px;min-height:24px;font-size:9pt"
+        )
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_view)
         cv.addWidget(self.export_btn)
@@ -2759,7 +3079,9 @@ class T6(QWidget):
         rv.setContentsMargins(0, 0, 0, 0)
 
         with matplotlib.rc_context(MPL_DARK):
-            self.fig3d = Figure(figsize=(10, 8), dpi=110, tight_layout=False, facecolor='#0a0d12')
+            self.fig3d = Figure(
+                figsize=(10, 8), dpi=110, tight_layout=False, facecolor="#0a0d12"
+            )
 
         self.canvas3d = FigureCanvas(self.fig3d)
         toolbar3d = NavigationToolbar(self.canvas3d, right)
@@ -2774,12 +3096,12 @@ class T6(QWidget):
         #   - scroll wheel     → zoom in/out
         #   - double-click     → reset view
         # We hook matplotlib's event system to add wheel zoom and right-click pan.
-        self._init_view_state = None     # saved on first plot for reset
+        self._init_view_state = None  # saved on first plot for reset
         self._pan_state = None
-        self.canvas3d.mpl_connect('scroll_event', self._on_3d_scroll)
-        self.canvas3d.mpl_connect('button_press_event', self._on_3d_press)
-        self.canvas3d.mpl_connect('button_release_event', self._on_3d_release)
-        self.canvas3d.mpl_connect('motion_notify_event', self._on_3d_motion)
+        self.canvas3d.mpl_connect("scroll_event", self._on_3d_scroll)
+        self.canvas3d.mpl_connect("button_press_event", self._on_3d_press)
+        self.canvas3d.mpl_connect("button_release_event", self._on_3d_release)
+        self.canvas3d.mpl_connect("motion_notify_event", self._on_3d_motion)
 
         # Initial blank view with helpful message
         self._show_message(
@@ -2789,10 +3111,10 @@ class T6(QWidget):
     # ── Interactive controls (zoom, pan, reset) ───────────────────────────
     def _current_3d_axis(self):
         """Return the active 3D axes if present, else None."""
-        if not hasattr(self, 'fig3d') or self.fig3d is None:
+        if not hasattr(self, "fig3d") or self.fig3d is None:
             return None
         for ax in self.fig3d.axes:
-            if hasattr(ax, 'get_proj') and hasattr(ax, 'get_zlim'):
+            if hasattr(ax, "get_proj") and hasattr(ax, "get_zlim"):
                 return ax
         return None
 
@@ -2801,7 +3123,7 @@ class T6(QWidget):
         ax = self._current_3d_axis()
         if ax is None:
             return
-        factor = 0.85 if event.button == 'up' else 1.15
+        factor = 0.85 if event.button == "up" else 1.15
         for getlim, setlim in [
             (ax.get_xlim, ax.set_xlim),
             (ax.get_ylim, ax.set_ylim),
@@ -2823,11 +3145,11 @@ class T6(QWidget):
             if ax is None:
                 return
             self._pan_state = {
-                'x': event.x,
-                'y': event.y,
-                'xlim': ax.get_xlim(),
-                'ylim': ax.get_ylim(),
-                'zlim': ax.get_zlim(),
+                "x": event.x,
+                "y": event.y,
+                "xlim": ax.get_xlim(),
+                "ylim": ax.get_ylim(),
+                "zlim": ax.get_zlim(),
             }
 
     def _on_3d_release(self, event):
@@ -2842,16 +3164,16 @@ class T6(QWidget):
         if ax is None:
             return
         st = self._pan_state
-        dx_pix = event.x - st['x']
-        dy_pix = event.y - st['y']
+        dx_pix = event.x - st["x"]
+        dy_pix = event.y - st["y"]
         # Convert to data units using axis ranges and figure size
         w, h = self.canvas3d.get_width_height()
-        scale_x = (st['xlim'][1] - st['xlim'][0]) / max(w, 1)
-        scale_y = (st['ylim'][1] - st['ylim'][0]) / max(h, 1)
+        scale_x = (st["xlim"][1] - st["xlim"][0]) / max(w, 1)
+        scale_y = (st["ylim"][1] - st["ylim"][0]) / max(h, 1)
         # Map screen drag to a 3D camera-relative shift. Simpler model:
         # drag x → shift X, drag y → shift Y.
-        ax.set_xlim(st['xlim'][0] - dx_pix * scale_x, st['xlim'][1] - dx_pix * scale_x)
-        ax.set_ylim(st['ylim'][0] + dy_pix * scale_y, st['ylim'][1] + dy_pix * scale_y)
+        ax.set_xlim(st["xlim"][0] - dx_pix * scale_x, st["xlim"][1] - dx_pix * scale_x)
+        ax.set_ylim(st["ylim"][0] + dy_pix * scale_y, st["ylim"][1] + dy_pix * scale_y)
         self.canvas3d.draw_idle()
 
     def _reset_3d_view(self):
@@ -2860,11 +3182,11 @@ class T6(QWidget):
         if ax is None or self._init_view_state is None:
             return
         st = self._init_view_state
-        ax.set_xlim(*st['xlim'])
-        ax.set_ylim(*st['ylim'])
-        ax.set_zlim(*st['zlim'])
+        ax.set_xlim(*st["xlim"])
+        ax.set_ylim(*st["ylim"])
+        ax.set_zlim(*st["zlim"])
         try:
-            ax.view_init(elev=st['elev'], azim=st['azim'])
+            ax.view_init(elev=st["elev"], azim=st["azim"])
         except Exception:
             pass
         self.canvas3d.draw_idle()
@@ -2876,25 +3198,34 @@ class T6(QWidget):
             return
         try:
             self._init_view_state = {
-                'xlim': ax.get_xlim(),
-                'ylim': ax.get_ylim(),
-                'zlim': ax.get_zlim(),
-                'elev': ax.elev,
-                'azim': ax.azim,
+                "xlim": ax.get_xlim(),
+                "ylim": ax.get_ylim(),
+                "zlim": ax.get_zlim(),
+                "elev": ax.elev,
+                "azim": ax.azim,
             }
         except Exception:
             self._init_view_state = None
 
-    def _show_message(self, msg, color='#8b949e'):
+    def _show_message(self, msg, color="#8b949e"):
         """Display a centered text message in the canvas."""
         with matplotlib.rc_context(MPL_DARK):
             self.fig3d.clear()
             ax = self.fig3d.add_subplot(111)
-            ax.set_facecolor('#0a0d12')
-            ax.text(0.5, 0.5, msg, ha='center', va='center',
-                    fontsize=14, color=color, transform=ax.transAxes,
-                    multialignment='center')
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_facecolor("#0a0d12")
+            ax.text(
+                0.5,
+                0.5,
+                msg,
+                ha="center",
+                va="center",
+                fontsize=14,
+                color=color,
+                transform=ax.transAxes,
+                multialignment="center",
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
             for spine in ax.spines.values():
                 spine.set_visible(False)
         self.canvas3d.draw()
@@ -2916,17 +3247,17 @@ class T6(QWidget):
     def _suggest_scale_defaults(self):
         """When mode changes, set sensible vmin/vmax for the new field."""
         idx = self.mode_combo.currentIndex()
-        if idx == 1:                     # Phase
+        if idx == 1:  # Phase
             self.vmin_spin.setValue(-3.1416)
             self.vmax_spin.setValue(3.1416)
-        else:                            # Density or strain — use current data
+        else:  # Density or strain — use current data
             if self._result is not None:
                 if idx == 0:
-                    arr = self._result['amplitude']
+                    arr = self._result["amplitude"]
                 else:
                     # Strain: gradient of phase
-                    phase = self._result['phase']
-                    sup = self._result['support'] > 0.5
+                    phase = self._result["phase"]
+                    sup = self._result["support"] > 0.5
                     if sup.sum() > 0:
                         mean = np.angle(np.mean(np.exp(1j * phase[sup])))
                         phase = np.angle(np.exp(1j * (phase - mean)))
@@ -2946,10 +3277,10 @@ class T6(QWidget):
     def set_result(self, result: dict):
         """Called from T5 when reconstruction finishes."""
         self._result = result
-        support = result['support']
+        support = result["support"]
         n_vox = int((support > 0.5).sum())
         n_total = support.size
-        amp_max = float(result['amplitude'].max())
+        amp_max = float(result["amplitude"].max())
         sup_pct = 100.0 * n_vox / n_total
 
         # Warn if support is suspicious
@@ -2973,39 +3304,43 @@ class T6(QWidget):
         self._show_message(
             "✓ Reconstruction loaded\n\n"
             "Click 'View Reconstruction'\nto render the 3D object.",
-            color='#3fb950'
+            color="#3fb950",
         )
 
     def _render_now(self):
         """Render the 3D view with current settings."""
         if self._result is None:
-            self._show_message("No data loaded.\nRun a reconstruction in Tab 5 first.",
-                               color='#f85149')
+            self._show_message(
+                "No data loaded.\nRun a reconstruction in Tab 5 first.", color="#f85149"
+            )
             return
         self._update_labels()
-        self._show_message("Building 3D scene...", color='#8b949e')
+        self._show_message("Building 3D scene...", color="#8b949e")
         QApplication.processEvents()  # update UI
 
         try:
             self._draw_3d()
             self.export_btn.setEnabled(True)
         except DataQualityError as e:
-            self._show_message(f"Cannot render this reconstruction:\n\n{e}",
-                               color='#f0883e')
+            self._show_message(
+                f"Cannot render this reconstruction:\n\n{e}", color="#f0883e"
+            )
             self.export_btn.setEnabled(False)
         except Exception as e:
             import traceback
+
             tb = traceback.format_exc()
             print(f"3D render error:\n{tb}")
-            self._show_message(f"Render error:\n{str(e)[:200]}",
-                               color='#f85149')
+            self._show_message(f"Render error:\n{str(e)[:200]}", color="#f85149")
             self.export_btn.setEnabled(False)
 
     def _draw_3d(self):
         """Build the 3D plot with selectable render style."""
         r = self._result
         mode_idx = self.mode_combo.currentIndex()
-        render_idx = self.render_combo.currentIndex()  # 0=points, 1=isosurface, 2=surface only
+        render_idx = (
+            self.render_combo.currentIndex()
+        )  # 0=points, 1=isosurface, 2=surface only
         threshold = self.thresh_slider.value() / 100.0
         opacity = self.opacity_slider.value() / 100.0
         cmap = self.cmap_combo.currentText()
@@ -3013,8 +3348,8 @@ class T6(QWidget):
         clip_pos = self.clip_slider.value() / 100.0
         point_size = float(self.size_slider.value())
 
-        support = r['support']
-        amp = r['amplitude']
+        support = r["support"]
+        amp = r["amplitude"]
         N = amp.shape[0]
 
         # Sanity checks
@@ -3035,21 +3370,22 @@ class T6(QWidget):
         # ── Compute physical-strain field properly (not just gradient norm) ──
         # Phase displacement-corrected and smoothed before gradient
         from scipy.ndimage import gaussian_filter
-        sup_mask = (support > 0.5)
+
+        sup_mask = support > 0.5
 
         # Build scalar field
         if mode_idx == 0:
             scalar = amp.copy()
             cb_label = "|ρ(r)| (electron density)"
         elif mode_idx == 1:
-            phase = r['phase'].copy()
+            phase = r["phase"].copy()
             if sup_mask.sum() > 0:
                 mean = np.angle(np.mean(np.exp(1j * phase[sup_mask])))
                 phase = np.angle(np.exp(1j * (phase - mean)))
             scalar = phase * sup_mask
             cb_label = "φ(r) phase [rad]"
         else:
-            phase = r['phase'].copy()
+            phase = r["phase"].copy()
             if sup_mask.sum() > 0:
                 mean = np.angle(np.mean(np.exp(1j * phase[sup_mask])))
                 phase = np.angle(np.exp(1j * (phase - mean)))
@@ -3063,6 +3399,7 @@ class T6(QWidget):
             # boundary-gradient artifacts (∇φ is ill-defined at the edge)
             try:
                 from scipy.ndimage import binary_erosion
+
                 strain_mask = binary_erosion(sup_mask, iterations=1)
                 strain = strain * strain_mask
             except ImportError:
@@ -3071,7 +3408,7 @@ class T6(QWidget):
             cb_label = "|∇φ(r)| (strain magnitude)"
 
         # Voxel pitch
-        voxel_nm = r.get('voxel_size_nm', None)
+        voxel_nm = r.get("voxel_size_nm", None)
         if voxel_nm is not None and np.asarray(voxel_nm).size >= 1:
             vn = np.asarray(voxel_nm).flatten()
             sx = sy = sz = float(vn[0]) if len(vn) == 1 else None
@@ -3092,7 +3429,9 @@ class T6(QWidget):
                 elif mode_idx == 2:
                     nz = values_for_scale[values_for_scale > 1e-9]
                     if len(nz) > 10:
-                        return float(np.percentile(nz, 50)), float(np.percentile(nz, 99))
+                        return float(np.percentile(nz, 50)), float(
+                            np.percentile(nz, 99)
+                        )
                     return 0.0, max(float(values_for_scale.max()), 1e-6)
                 else:
                     vmin = float(np.percentile(values_for_scale, 5))
@@ -3108,10 +3447,11 @@ class T6(QWidget):
                 return v0, v1
 
         from mpl_toolkits.mplot3d import Axes3D  # noqa
+
         with matplotlib.rc_context(MPL_DARK):
             self.fig3d.clear()
-            ax = self.fig3d.add_subplot(111, projection='3d')
-            ax.set_facecolor('#0a0d12')
+            ax = self.fig3d.add_subplot(111, projection="3d")
+            ax.set_facecolor("#0a0d12")
 
             # ────────────────────────────────────────────────────────────
             # ISOSURFACE / SURFACE-ONLY rendering using marching cubes
@@ -3132,9 +3472,9 @@ class T6(QWidget):
                 #   - Surface only: less smoothing → preserves mesh detail
                 amp_max = max(float(amp.max()), 1e-12)
                 iso_value = threshold * amp_max
-                if render_idx == 1:    # Isosurface: smoother
+                if render_idx == 1:  # Isosurface: smoother
                     amp_smooth = gaussian_filter(amp, sigma=1.5)
-                else:                  # Surface only: less smooth
+                else:  # Surface only: less smooth
                     amp_smooth = gaussian_filter(amp, sigma=0.4)
 
                 if amp_smooth.max() < iso_value:
@@ -3145,8 +3485,11 @@ class T6(QWidget):
 
                 try:
                     mc_result = measure.marching_cubes(
-                        amp_smooth, level=iso_value, spacing=(sx, sy, sz),
-                        gradient_direction='descent', allow_degenerate=False,
+                        amp_smooth,
+                        level=iso_value,
+                        spacing=(sx, sy, sz),
+                        gradient_direction="descent",
+                        allow_degenerate=False,
                     )
                     verts = np.asarray(mc_result[0]).reshape(-1, 3)
                     faces = np.asarray(mc_result[1]).reshape(-1, 3).astype(np.int64)
@@ -3172,7 +3515,7 @@ class T6(QWidget):
                 # Apply clip plane to vertices/faces
                 if clip_enabled:
                     clip_axis = self.clip_axis_combo.currentIndex()
-                    clip_above = (self.clip_dir_combo.currentIndex() == 1)
+                    clip_above = self.clip_dir_combo.currentIndex() == 1
                     clip_pos_phys = (clip_pos - 0.5) * N * (sx, sy, sz)[clip_axis]
                     if clip_above:
                         keep_v = verts_c[:, clip_axis] > clip_pos_phys
@@ -3187,21 +3530,22 @@ class T6(QWidget):
 
                 # If somehow faces became empty after clip, abort cleanly
                 if len(faces) < 1:
-                    raise DataQualityError(
-                        "No faces remain to render."
-                    )
+                    raise DataQualityError("No faces remain to render.")
 
                 # Sample the SCALAR FIELD at vertex positions to color the surface.
                 from scipy.ndimage import map_coordinates
+
                 # `verts` from marching_cubes is in PHYSICAL units (we passed
                 # spacing=(sx,sy,sz)). For map_coordinates we need voxel indices.
-                vertex_voxels = np.column_stack([
-                    verts[:, 0] / max(sx, 1e-12),
-                    verts[:, 1] / max(sy, 1e-12),
-                    verts[:, 2] / max(sz, 1e-12),
-                ]).astype(np.float64)
+                vertex_voxels = np.column_stack(
+                    [
+                        verts[:, 0] / max(sx, 1e-12),
+                        verts[:, 1] / max(sy, 1e-12),
+                        verts[:, 2] / max(sz, 1e-12),
+                    ]
+                ).astype(np.float64)
                 vertex_scalar = map_coordinates(
-                    scalar, vertex_voxels.T, order=1, mode='constant', cval=0.0
+                    scalar, vertex_voxels.T, order=1, mode="constant", cval=0.0
                 )
                 vertex_scalar = np.asarray(vertex_scalar).reshape(-1)
 
@@ -3226,14 +3570,16 @@ class T6(QWidget):
                 # Sample amplitude at vertices, average per face, normalize.
                 # Same formula as in point cloud: alpha = opacity ** (1/amp_norm).
                 vertex_amp = map_coordinates(
-                    amp, vertex_voxels.T, order=1, mode='constant', cval=0.0
+                    amp, vertex_voxels.T, order=1, mode="constant", cval=0.0
                 )
                 vertex_amp = np.asarray(vertex_amp).reshape(-1)
                 face_amp = vertex_amp[faces].mean(axis=1)
                 face_amp_min = float(face_amp.min()) if len(face_amp) else 0.0
                 face_amp_max = float(face_amp.max()) if len(face_amp) else 1.0
                 if face_amp_max - face_amp_min > 1e-12:
-                    face_amp_norm = (face_amp - face_amp_min) / (face_amp_max - face_amp_min)
+                    face_amp_norm = (face_amp - face_amp_min) / (
+                        face_amp_max - face_amp_min
+                    )
                 else:
                     face_amp_norm = np.ones_like(face_amp)
                 face_amp_norm = np.clip(face_amp_norm, 0.05, 1.0)
@@ -3241,20 +3587,18 @@ class T6(QWidget):
                     per_face_alpha = np.ones_like(face_amp_norm)
                 else:
                     safe_op = max(opacity, 1e-6)
-                    per_face_alpha = np.clip(
-                        safe_op ** (1.0 / face_amp_norm), 0.0, 1.0
-                    )
+                    per_face_alpha = np.clip(safe_op ** (1.0 / face_amp_norm), 0.0, 1.0)
                 face_colors[:, 3] = per_face_alpha
 
                 # Edge color
                 if render_idx == 2:
                     edge_colors = face_colors[:, :3] * 0.5
                 else:
-                    edge_colors = 'none'
+                    edge_colors = "none"
 
                 # Build the triangle vertex array explicitly as a (N_faces, 3, 3)
                 # to avoid any matplotlib internal broadcast surprises.
-                tri_verts = verts_c[faces]   # shape (N_faces, 3, 3)
+                tri_verts = verts_c[faces]  # shape (N_faces, 3, 3)
                 tri_verts = np.asarray(tri_verts).reshape(len(faces), 3, 3)
 
                 # Apply manual lighting per face for a "polished surface" look,
@@ -3285,6 +3629,7 @@ class T6(QWidget):
                 # shading (shade=True can crash on degenerate meshes); the
                 # manual per-face lighting above provides the smooth-surface look.
                 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
                 mesh = Poly3DCollection(
                     tri_verts,
                     facecolors=face_colors_lit,
@@ -3314,7 +3659,7 @@ class T6(QWidget):
                         # Apply the same clip plane to internal points
                         if clip_enabled:
                             ca = self.clip_axis_combo.currentIndex()
-                            cabove = (self.clip_dir_combo.currentIndex() == 1)
+                            cabove = self.clip_dir_combo.currentIndex() == 1
                             cpos_idx = int(clip_pos * N)
                             if cabove:
                                 k = deep_coords[:, ca] > cpos_idx
@@ -3325,8 +3670,9 @@ class T6(QWidget):
                             dcx = (deep_coords[:, 0] - N / 2) * sx
                             dcy = (deep_coords[:, 1] - N / 2) * sy
                             dcz = (deep_coords[:, 2] - N / 2) * sz
-                            dval = scalar[deep_coords[:, 0], deep_coords[:, 1],
-                                            deep_coords[:, 2]]
+                            dval = scalar[
+                                deep_coords[:, 0], deep_coords[:, 1], deep_coords[:, 2]
+                            ]
                             d_norm = np.clip(
                                 (dval - vmin) / max(vmax - vmin, 1e-12), 0.0, 1.0
                             )
@@ -3334,9 +3680,15 @@ class T6(QWidget):
                             # Internal points use a softer alpha so they don't
                             # crowd the surface but remain visible
                             d_rgba[:, 3] = 0.25 * opacity
-                            ax.scatter(dcx, dcy, dcz, c=d_rgba,
-                                        s=max(point_size * 0.4, 1.5),
-                                        edgecolors='none', depthshade=False)
+                            ax.scatter(
+                                dcx,
+                                dcy,
+                                dcz,
+                                c=d_rgba,
+                                s=max(point_size * 0.4, 1.5),
+                                edgecolors="none",
+                                depthshade=False,
+                            )
 
                 # Dummy mappable for colorbar (represents the scalar field)
                 norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
@@ -3345,11 +3697,14 @@ class T6(QWidget):
 
                 # Title
                 tri_count = len(faces)
-                ax.set_title(f"{cb_label}    {tri_count:,} triangles",
-                             color='#4f98a3', fontsize=11)
+                ax.set_title(
+                    f"{cb_label}    {tri_count:,} triangles",
+                    color="#4f98a3",
+                    fontsize=11,
+                )
                 cb = self.fig3d.colorbar(sm, ax=ax, shrink=0.6, pad=0.08)
-                cb.set_label(cb_label, color='#e6edf3', fontsize=9)
-                cb.ax.tick_params(colors='#8b949e', labelsize=8)
+                cb.set_label(cb_label, color="#e6edf3", fontsize=9)
+                cb.ax.tick_params(colors="#8b949e", labelsize=8)
 
             else:
                 # ────────────────────────────────────────────────────────────
@@ -3370,7 +3725,7 @@ class T6(QWidget):
 
                 if clip_enabled:
                     clip_axis = self.clip_axis_combo.currentIndex()
-                    clip_above = (self.clip_dir_combo.currentIndex() == 1)
+                    clip_above = self.clip_dir_combo.currentIndex() == 1
                     clip_pos_idx = int(clip_pos * N)
                     if clip_above:
                         keep = coords[:, clip_axis] > clip_pos_idx
@@ -3384,7 +3739,9 @@ class T6(QWidget):
 
                 max_pts = 15000
                 if len(coords) > max_pts:
-                    idx = np.random.default_rng(0).choice(len(coords), max_pts, replace=False)
+                    idx = np.random.default_rng(0).choice(
+                        len(coords), max_pts, replace=False
+                    )
                     coords = coords[idx]
                     values = values[idx]
                     amp_at_voxels = amp_at_voxels[idx]
@@ -3419,25 +3776,26 @@ class T6(QWidget):
 
                 # Build per-point RGBA from the colormap, then override alpha
                 cmap_obj = matplotlib.colormaps[cmap]
-                norm_v = np.clip(
-                    (values - vmin) / max(vmax - vmin, 1e-12), 0.0, 1.0
-                )
+                norm_v = np.clip((values - vmin) / max(vmax - vmin, 1e-12), 0.0, 1.0)
                 rgba = np.asarray(cmap_obj(norm_v))
                 rgba[:, 3] = per_alpha
 
-                sc = ax.scatter(cx, cy, cz, c=rgba,
-                                 s=point_size,
-                                 edgecolors='none', depthshade=True)
-                ax.set_title(f"{cb_label}    {len(coords):,} voxels",
-                             color='#4f98a3', fontsize=11)
+                sc = ax.scatter(
+                    cx, cy, cz, c=rgba, s=point_size, edgecolors="none", depthshade=True
+                )
+                ax.set_title(
+                    f"{cb_label}    {len(coords):,} voxels",
+                    color="#4f98a3",
+                    fontsize=11,
+                )
                 # Build a separate scalar mappable for the colorbar (so it
                 # represents the scalar field, not the per-voxel alpha).
                 norm_obj = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
                 sm = matplotlib.cm.ScalarMappable(cmap=cmap_obj, norm=norm_obj)
                 sm.set_array([])
                 cb = self.fig3d.colorbar(sm, ax=ax, shrink=0.6, pad=0.08)
-                cb.set_label(cb_label, color='#e6edf3', fontsize=9)
-                cb.ax.tick_params(colors='#8b949e', labelsize=8)
+                cb.set_label(cb_label, color="#e6edf3", fontsize=9)
+                cb.ax.tick_params(colors="#8b949e", labelsize=8)
 
             # ── Common axis setup ────────────────────────────────────────
             half_x = (N / 2) * sx
@@ -3446,14 +3804,14 @@ class T6(QWidget):
             ax.set_xlim(-half_x, half_x)
             ax.set_ylim(-half_y, half_y)
             ax.set_zlim(-half_z, half_z)
-            ax.set_xlabel(f'x [{axis_units}]', color='#8b949e', fontsize=9)
-            ax.set_ylabel(f'y [{axis_units}]', color='#8b949e', fontsize=9)
-            ax.set_zlabel(f'z [{axis_units}]', color='#8b949e', fontsize=9)
-            ax.tick_params(colors='#8b949e', labelsize=8)
+            ax.set_xlabel(f"x [{axis_units}]", color="#8b949e", fontsize=9)
+            ax.set_ylabel(f"y [{axis_units}]", color="#8b949e", fontsize=9)
+            ax.set_zlabel(f"z [{axis_units}]", color="#8b949e", fontsize=9)
+            ax.tick_params(colors="#8b949e", labelsize=8)
 
             for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
                 pane.set_facecolor((0.04, 0.05, 0.07, 0.6))
-                pane.set_edgecolor('#30363d')
+                pane.set_edgecolor("#30363d")
 
         self.canvas3d.draw()
         # Save the just-rendered view as the "home" for double-click-to-reset
@@ -3465,7 +3823,7 @@ class T6(QWidget):
             self, "Export 3D view", "bcdi_3d_view.png", "PNG (*.png)"
         )
         if path:
-            self.fig3d.savefig(path, dpi=200, bbox_inches='tight', facecolor='#0a0d12')
+            self.fig3d.savefig(path, dpi=200, bbox_inches="tight", facecolor="#0a0d12")
 
     def _export_vti(self):
         """Export reconstruction as ParaView-compatible .vti file."""
@@ -3484,7 +3842,8 @@ class T6(QWidget):
         try:
             self._write_vti(path)
             QMessageBox.information(
-                self, "Export complete",
+                self,
+                "Export complete",
                 f"Saved:\n{path}\n\n"
                 f"Open in ParaView for high-quality 3D rendering,\n"
                 f"isosurface extraction, and dislocation tracing.\n\n"
@@ -3492,8 +3851,10 @@ class T6(QWidget):
             )
         except Exception as e:
             import traceback
+
             QMessageBox.critical(
-                self, "Export failed",
+                self,
+                "Export failed",
                 f"Could not write VTI file:\n\n{e}\n\n"
                 f"{traceback.format_exc()[:300]}",
             )
@@ -3521,10 +3882,11 @@ class T6(QWidget):
         still available as 'amplitude_full' if you want the original values.
         """
         from scipy.ndimage import gaussian_filter
+
         r = self._result
-        amp_raw = r['amplitude'].astype(np.float32)
-        phase_raw = r['phase'].astype(np.float32)
-        sup = r['support'].astype(np.float32)
+        amp_raw = r["amplitude"].astype(np.float32)
+        phase_raw = r["phase"].astype(np.float32)
+        sup = r["support"].astype(np.float32)
         sup_mask = sup > 0.5
 
         # Apply current GUI isosurface threshold to the EXPORTED amplitude.
@@ -3533,12 +3895,16 @@ class T6(QWidget):
         amp_max = max(float(amp_raw.max()), 1e-12)
         thr_value = threshold * amp_max
         # Soft mask: zero below threshold, keep value above
-        amp_thresholded = np.where(amp_raw >= thr_value, amp_raw, 0.0).astype(np.float32)
+        amp_thresholded = np.where(amp_raw >= thr_value, amp_raw, 0.0).astype(
+            np.float32
+        )
 
         # Phase relative to support mean
         if sup_mask.sum() > 0:
             mean = np.angle(np.mean(np.exp(1j * phase_raw[sup_mask])))
-            phase_centered = np.angle(np.exp(1j * (phase_raw - mean))).astype(np.float32)
+            phase_centered = np.angle(np.exp(1j * (phase_raw - mean))).astype(
+                np.float32
+            )
         else:
             phase_centered = phase_raw
 
@@ -3553,6 +3919,7 @@ class T6(QWidget):
         strain = np.sqrt(gx**2 + gy**2 + gz**2).astype(np.float32)
         try:
             from scipy.ndimage import binary_erosion
+
             sm = binary_erosion(sup_mask, iterations=1)
             # NaN outside the eroded support
             strain_export = strain.copy()
@@ -3562,7 +3929,7 @@ class T6(QWidget):
             strain_export[~sup_mask] = np.nan
 
         # Voxel spacing
-        voxel_nm = r.get('voxel_size_nm', None)
+        voxel_nm = r.get("voxel_size_nm", None)
         if voxel_nm is not None and np.asarray(voxel_nm).size >= 1:
             vn = np.asarray(voxel_nm).flatten()
             if len(vn) == 1:
@@ -3573,37 +3940,42 @@ class T6(QWidget):
             spacing = (1.0, 1.0, 1.0)
 
         N = amp_raw.shape[0]
-        origin = (-(N / 2) * spacing[0],
-                  -(N / 2) * spacing[1],
-                  -(N / 2) * spacing[2])
+        origin = (-(N / 2) * spacing[0], -(N / 2) * spacing[1], -(N / 2) * spacing[2])
 
         arrays_to_write = [
-            ('amplitude',      amp_thresholded),
-            ('amplitude_full', amp_raw),
-            ('phase',          phase_export),
-            ('strain',         strain_export),
-            ('support',        sup),
+            ("amplitude", amp_thresholded),
+            ("amplitude_full", amp_raw),
+            ("phase", phase_export),
+            ("strain", strain_export),
+            ("support", sup),
         ]
 
         # Try VTK Python first (most reliable), fall back to manual XML
         try:
             import vtk
             from vtk.util import numpy_support
-            self._write_vti_vtk(path, arrays_to_write, spacing, origin, vtk, numpy_support)
+
+            self._write_vti_vtk(
+                path, arrays_to_write, spacing, origin, vtk, numpy_support
+            )
         except ImportError:
             self._write_vti_manual(path, arrays_to_write, spacing, origin)
 
-    def _write_vti_vtk(self, path, arrays_to_write, spacing, origin, vtk, numpy_support):
+    def _write_vti_vtk(
+        self, path, arrays_to_write, spacing, origin, vtk, numpy_support
+    ):
         """Write VTI using the official VTK library (best quality)."""
         first_arr = arrays_to_write[0][1]
         image_data = vtk.vtkImageData()
-        image_data.SetDimensions(first_arr.shape[0], first_arr.shape[1], first_arr.shape[2])
+        image_data.SetDimensions(
+            first_arr.shape[0], first_arr.shape[1], first_arr.shape[2]
+        )
         image_data.SetSpacing(*spacing)
         image_data.SetOrigin(*origin)
 
         for name, arr in arrays_to_write:
             # VTK expects flat, Fortran-ordered for ImageData
-            flat = arr.astype(np.float32).ravel(order='F')
+            flat = arr.astype(np.float32).ravel(order="F")
             vtk_arr = numpy_support.numpy_to_vtk(flat, deep=True)
             vtk_arr.SetName(name)
             image_data.GetPointData().AddArray(vtk_arr)
@@ -3611,7 +3983,7 @@ class T6(QWidget):
         # Set first array as the active scalar
         image_data.GetPointData().SetActiveScalars(arrays_to_write[0][0])
 
-        if path.endswith('.vtk'):
+        if path.endswith(".vtk"):
             writer = vtk.vtkStructuredPointsWriter()
         else:
             writer = vtk.vtkXMLImageDataWriter()
@@ -3622,15 +3994,18 @@ class T6(QWidget):
 
     def _write_vti_manual(self, path, arrays_to_write, spacing, origin):
         """Write VTI without the vtk library — manual XML + base64."""
-        import base64, zlib, struct
+        import base64
+        import struct
+        import zlib
+
         first_arr = arrays_to_write[0][1]
         N1, N2, N3 = first_arr.shape
 
         def _encode(arr):
-            flat = arr.astype(np.float32).ravel(order='F').tobytes()
+            flat = arr.astype(np.float32).ravel(order="F").tobytes()
             compressed = zlib.compress(flat, level=6)
-            header = struct.pack('<IIII', 1, len(flat), len(flat), len(compressed))
-            return base64.b64encode(header + compressed).decode('ascii')
+            header = struct.pack("<IIII", 1, len(flat), len(flat), len(compressed))
+            return base64.b64encode(header + compressed).decode("ascii")
 
         arrays_xml = ""
         for name, arr in arrays_to_write:
@@ -3638,11 +4013,11 @@ class T6(QWidget):
             arrays_xml += (
                 f'<DataArray type="Float32" Name="{name}" '
                 f'format="binary" NumberOfComponents="1">'
-                f'{data_b64}</DataArray>\n'
+                f"{data_b64}</DataArray>\n"
             )
 
         first_name = arrays_to_write[0][0]
-        xml = f'''<?xml version="1.0"?>
+        xml = f"""<?xml version="1.0"?>
 <VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
 <ImageData WholeExtent="0 {N1-1} 0 {N2-1} 0 {N3-1}" Origin="{origin[0]} {origin[1]} {origin[2]}" Spacing="{spacing[0]} {spacing[1]} {spacing[2]}">
 <Piece Extent="0 {N1-1} 0 {N2-1} 0 {N3-1}">
@@ -3652,11 +4027,12 @@ class T6(QWidget):
 </Piece>
 </ImageData>
 </VTKFile>
-'''
-        with open(path, 'w', encoding='utf-8') as f:
+"""
+        with open(path, "w", encoding="utf-8") as f:
             f.write(xml)
 
 
 class DataQualityError(Exception):
     """Raised when the reconstruction is not viewable due to data issues."""
+
     pass

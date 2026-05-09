@@ -22,22 +22,31 @@ Usage:
 """
 
 from __future__ import annotations
-import os, sys, json, argparse, time
-import numpy as np
+
+import argparse
+import json
+import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 # ── Import from your existing bcdi_core ──────────────────────────────────────
 from .bcdi_core import (
-    MATERIAL_PRESETS, BCDIConfig, CrystalBuilder, ReflectionCalculator,
-    BCDISimulator, DislocationConfig, add_experimental_noise,
-    default_shape_for_material, compatible_shapes
+    MATERIAL_PRESETS,
+    BCDIConfig,
+    BCDISimulator,
+    CrystalBuilder,
+    DislocationConfig,
+    ReflectionCalculator,
+    add_experimental_noise,
+    compatible_shapes,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Random parameter samplers
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def random_material(rng: np.random.Generator) -> str:
     """Pick a random material from presets."""
@@ -51,7 +60,9 @@ def random_shape(material_name: str, rng: np.random.Generator) -> str:
     return rng.choice(shapes)
 
 
-def random_supercell(rng: np.random.Generator, min_n: int = 10, max_n: int = 30) -> tuple:
+def random_supercell(
+    rng: np.random.Generator, min_n: int = 10, max_n: int = 30
+) -> tuple:
     """Random supercell multipliers. Keeps aspect ratio reasonable."""
     nx = rng.integers(min_n, max_n + 1)
     ny = rng.integers(min_n, max_n + 1)
@@ -61,28 +72,29 @@ def random_supercell(rng: np.random.Generator, min_n: int = 10, max_n: int = 30)
 
 def random_strain(rng: np.random.Generator) -> tuple:
     """Random strain type and magnitude."""
-    strain_types = ['none', 'none', 'radial_gradient', 'edge_dislocation', 'random']
+    strain_types = ["none", "none", "radial_gradient", "edge_dislocation", "random"]
     # Weight 'none' more heavily for balanced training
     stype = rng.choice(strain_types)
-    if stype == 'none':
+    if stype == "none":
         return stype, 0.0
     mag = float(10 ** rng.uniform(-5, -3))  # 1e-5 to 1e-3
     return stype, mag
 
 
-def random_dislocation(rng: np.random.Generator, lattice_a: float) -> Optional[DislocationConfig]:
+def random_dislocation(
+    rng: np.random.Generator, lattice_a: float
+) -> Optional[DislocationConfig]:
     """Randomly decide whether to add a dislocation, and configure it."""
     if rng.random() < 0.6:  # 60% no dislocation
         return None
-    dtype = rng.choice(['edge', 'screw', 'mixed'])
+    dtype = rng.choice(["edge", "screw", "mixed"])
     px = float(rng.uniform(0.3, 0.7))
     py = float(rng.uniform(0.3, 0.7))
-    line_dir = rng.choice(['X', 'Y', 'Z'])
+    line_dir = rng.choice(["X", "Y", "Z"])
     b = float(lattice_a * rng.uniform(0.8, 1.2))
     nu = float(rng.uniform(0.2, 0.4))
     return DislocationConfig(
-        dtype=dtype, pos_frac=(px, py), line_dir=line_dir,
-        b_angstrom=b, nu=nu
+        dtype=dtype, pos_frac=(px, py), line_dir=line_dir, b_angstrom=b, nu=nu
     )
 
 
@@ -91,17 +103,18 @@ def random_reflection(reflections_df, rng: np.random.Generator):
     if len(reflections_df) == 0:
         return None
     # Prefer BCDI-flagged reflections
-    bcdi = reflections_df[reflections_df['BCDI_flag']]
+    bcdi = reflections_df[reflections_df["BCDI_flag"]]
     if len(bcdi) > 0 and rng.random() < 0.8:
         row = bcdi.iloc[rng.integers(0, len(bcdi))]
     else:
         row = reflections_df.iloc[rng.integers(0, len(reflections_df))]
-    return row['hkl']
+    return row["hkl"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Core generation function
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def generate_single_sample(
     sample_id: int,
@@ -155,7 +168,7 @@ def generate_single_sample(
 
     strain_type, strain_mag = random_strain(rng)
     if not randomize_strain:
-        strain_type, strain_mag = 'none', 0.0
+        strain_type, strain_mag = "none", 0.0
     cfg.STRAIN_TYPE = strain_type
     cfg.STRAIN_MAGNITUDE = strain_mag
 
@@ -212,14 +225,15 @@ def generate_single_sample(
     if add_noise and rng.random() < 0.3:
         noise_opts = {}
         if rng.random() < 0.7:
-            noise_opts['poisson'] = True
+            noise_opts["poisson"] = True
         if rng.random() < 0.3:
-            noise_opts['readout_noise'] = float(rng.uniform(1, 10))
+            noise_opts["readout_noise"] = float(rng.uniform(1, 10))
         if rng.random() < 0.2:
-            noise_opts['air_scatter'] = float(rng.uniform(10, 200))
+            noise_opts["air_scatter"] = float(rng.uniform(10, 200))
         if noise_opts:
-            diffraction = add_experimental_noise(diffraction, **noise_opts,
-                                                  seed=sample_id)
+            diffraction = add_experimental_noise(
+                diffraction, **noise_opts, seed=sample_id
+            )
             noisy = True
 
     # Amplitude = sqrt(intensity)
@@ -227,33 +241,34 @@ def generate_single_sample(
 
     # ── 6. Build metadata ─────────────────────────────────────────────────
     metadata = {
-        'sample_id': sample_id,
-        'material': material,
-        'shape': shape,
-        'supercell': list(cfg.SUPERCELL_MULT),
-        'grid_size': grid_size,
-        'strain_type': strain_type,
-        'strain_magnitude': float(strain_mag),
-        'has_dislocation': disloc is not None,
-        'dislocation_type': disloc.dtype if disloc else 'none',
-        'hkl': list(hkl),
-        'oversampling': float(cfg.TARGET_OVERSAMPLING),
-        'noisy': noisy,
-        'particle_size_nm': cfg.particle_size_nm.tolist(),
+        "sample_id": sample_id,
+        "material": material,
+        "shape": shape,
+        "supercell": list(cfg.SUPERCELL_MULT),
+        "grid_size": grid_size,
+        "strain_type": strain_type,
+        "strain_magnitude": float(strain_mag),
+        "has_dislocation": disloc is not None,
+        "dislocation_type": disloc.dtype if disloc else "none",
+        "hkl": list(hkl),
+        "oversampling": float(cfg.TARGET_OVERSAMPLING),
+        "noisy": noisy,
+        "particle_size_nm": cfg.particle_size_nm.tolist(),
     }
 
     return {
-        'amplitude': amplitude,
-        'phase_true': phase_true,
-        'support': support,
-        'diffraction': diffraction.astype(np.float32),
-        'metadata': metadata,
+        "amplitude": amplitude,
+        "phase_true": phase_true,
+        "support": support,
+        "diffraction": diffraction.astype(np.float32),
+        "metadata": metadata,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Batch generation
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def generate_dataset(
     output_dir: str,
@@ -298,7 +313,7 @@ def generate_dataset(
     t0 = time.time()
 
     print(f"{'='*60}")
-    print(f"BCDI Training Data Generator")
+    print("BCDI Training Data Generator")
     print(f"{'='*60}")
     print(f"  Output:     {out.resolve()}")
     print(f"  Samples:    {num_samples}")
@@ -338,24 +353,25 @@ def generate_dataset(
             # Real-space voxel pitch (nm) — needed by reconstruction GUI
             # voxel pitch = (object size × oversampling) / grid_size
             psize_arr = np.asarray(cfg.particle_size_nm, dtype=np.float32)
-            voxel_size_nm = (psize_arr * float(cfg.TARGET_OVERSAMPLING)
-                              / float(grid_size))
+            voxel_size_nm = (
+                psize_arr * float(cfg.TARGET_OVERSAMPLING) / float(grid_size)
+            )
             np.savez_compressed(
                 fpath,
-                amplitude=result['amplitude'],
-                phase_true=result['phase_true'],
-                support=result['support'],
-                diffraction=result['diffraction'],
+                amplitude=result["amplitude"],
+                phase_true=result["phase_true"],
+                support=result["support"],
+                diffraction=result["diffraction"],
                 voxel_size_nm=voxel_size_nm,
                 particle_size_nm=psize_arr,
             )
 
             # Save metadata separately for fast loading
             meta_path = out / f"sample_{i:05d}_meta.json"
-            with open(meta_path, 'w') as f:
-                json.dump(result['metadata'], f, indent=2)
+            with open(meta_path, "w") as f:
+                json.dump(result["metadata"], f, indent=2)
 
-            manifest.append(result['metadata'])
+            manifest.append(result["metadata"])
             generated += 1
 
             # Progress
@@ -364,7 +380,7 @@ def generate_dataset(
             eta = (num_samples - i - 1) / max(rate, 0.01)
 
             if (generated % 10 == 0) or generated == 1:
-                m = result['metadata']
+                m = result["metadata"]
                 print(
                     f"  [{generated:4d}/{num_samples}] "
                     f"{m['material']:12s} {m['shape']:10s} "
@@ -381,13 +397,17 @@ def generate_dataset(
 
     # Save manifest
     manifest_path = out / "manifest.json"
-    with open(manifest_path, 'w') as f:
-        json.dump({
-            'num_samples': generated,
-            'grid_size': grid_size,
-            'seed': seed,
-            'samples': manifest
-        }, f, indent=2)
+    with open(manifest_path, "w") as f:
+        json.dump(
+            {
+                "num_samples": generated,
+                "grid_size": grid_size,
+                "seed": seed,
+                "samples": manifest,
+            },
+            f,
+            indent=2,
+        )
 
     elapsed = time.time() - t0
     print(f"\n{'='*60}")
@@ -403,28 +423,45 @@ def generate_dataset(
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Generate BCDI training data for NN phase retrieval'
+        description="Generate BCDI training data for NN phase retrieval"
     )
-    parser.add_argument('--output_dir', type=str, default='./training_data',
-                        help='Output directory for .npz files')
-    parser.add_argument('--num_samples', type=int, default=2000,
-                        help='Number of samples to generate')
-    parser.add_argument('--grid_size', type=int, default=64,
-                        help='Grid size N (volume is NxNxN)')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--material', type=str, default=None,
-                        help='Lock to a specific material (e.g., "Au")')
-    parser.add_argument('--no_noise', action='store_true',
-                        help='Disable noise augmentation')
-    parser.add_argument('--no_resume', action='store_true',
-                        help='Regenerate all samples from scratch')
-    parser.add_argument('--no_dislocations', action='store_true',
-                        help='Disable random dislocations (all samples are clean)')
-    parser.add_argument('--no_strain', action='store_true',
-                        help='Disable random strain (all samples are unstrained)')
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./training_data",
+        help="Output directory for .npz files",
+    )
+    parser.add_argument(
+        "--num_samples", type=int, default=2000, help="Number of samples to generate"
+    )
+    parser.add_argument(
+        "--grid_size", type=int, default=64, help="Grid size N (volume is NxNxN)"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--material",
+        type=str,
+        default=None,
+        help='Lock to a specific material (e.g., "Au")',
+    )
+    parser.add_argument(
+        "--no_noise", action="store_true", help="Disable noise augmentation"
+    )
+    parser.add_argument(
+        "--no_resume", action="store_true", help="Regenerate all samples from scratch"
+    )
+    parser.add_argument(
+        "--no_dislocations",
+        action="store_true",
+        help="Disable random dislocations (all samples are clean)",
+    )
+    parser.add_argument(
+        "--no_strain",
+        action="store_true",
+        help="Disable random strain (all samples are unstrained)",
+    )
     args = parser.parse_args()
 
     generate_dataset(

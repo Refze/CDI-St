@@ -30,18 +30,21 @@ Reference:
 """
 
 from __future__ import annotations
+
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Building blocks (compatible with your nn_phase_model.py conventions)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class ConvBlock3D(nn.Module):
     """Two 3×3×3 convolutions with InstanceNorm + LeakyReLU."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.conv = nn.Sequential(
@@ -59,6 +62,7 @@ class ConvBlock3D(nn.Module):
 
 class DownBlock(nn.Module):
     """Downsample 2× via strided conv, then ConvBlock3D."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.down = nn.Conv3d(in_ch, in_ch, 2, stride=2, bias=False)
@@ -70,12 +74,13 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
     """Upsample + skip concatenation + ConvBlock3D."""
+
     def __init__(self, in_ch: int, skip_ch: int, out_ch: int):
         super().__init__()
         self.conv = ConvBlock3D(in_ch + skip_ch, out_ch)
 
     def forward(self, x, skip):
-        x = F.interpolate(x, size=skip.shape[2:], mode='trilinear', align_corners=False)
+        x = F.interpolate(x, size=skip.shape[2:], mode="trilinear", align_corners=False)
         return self.conv(torch.cat([x, skip], dim=1))
 
 
@@ -83,11 +88,13 @@ class UpBlock(nn.Module):
 # Decoder heads (one per output: amplitude and phase)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class DecoderBranch(nn.Module):
     """
     One decoder branch: takes the bottleneck + skip connections,
     produces a single-channel output with custom final activation.
     """
+
     def __init__(self, base_channels: int, activation: str):
         super().__init__()
         C = base_channels
@@ -102,10 +109,10 @@ class DecoderBranch(nn.Module):
             nn.Conv3d(C // 2, 1, 1),
         )
 
-        if activation == 'sigmoid':
-            self.final = nn.Sigmoid()          # for amplitude ∈ [0, 1]
-        elif activation == 'tanh':
-            self.final = nn.Tanh()             # for phase ∈ [-1, 1] (multiply by π)
+        if activation == "sigmoid":
+            self.final = nn.Sigmoid()  # for amplitude ∈ [0, 1]
+        elif activation == "tanh":
+            self.final = nn.Tanh()  # for phase ∈ [-1, 1] (multiply by π)
         else:
             raise ValueError(f"Unknown activation: {activation}")
 
@@ -119,6 +126,7 @@ class DecoderBranch(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main dual-output network
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class AutoPhaseNet3D(nn.Module):
     """
@@ -166,8 +174,8 @@ class AutoPhaseNet3D(nn.Module):
         self.bottleneck = DownBlock(C * 4, C * 8)
 
         # Two independent decoder branches
-        self.amp_decoder = DecoderBranch(C, activation='sigmoid')
-        self.phase_decoder = DecoderBranch(C, activation='tanh')
+        self.amp_decoder = DecoderBranch(C, activation="sigmoid")
+        self.phase_decoder = DecoderBranch(C, activation="tanh")
 
     def _zero_pad_mask(self, shape, device):
         """
@@ -179,7 +187,7 @@ class AutoPhaseNet3D(nn.Module):
         B, _, N1, N2, N3 = shape
         mask = torch.zeros((1, 1, N1, N2, N3), device=device)
         q1, q2, q3 = N1 // 4, N2 // 4, N3 // 4
-        mask[:, :, q1:q1 + N1 // 2, q2:q2 + N2 // 2, q3:q3 + N3 // 2] = 1.0
+        mask[:, :, q1 : q1 + N1 // 2, q2 : q2 + N2 // 2, q3 : q3 + N3 // 2] = 1.0
         return mask
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -195,10 +203,10 @@ class AutoPhaseNet3D(nn.Module):
         phase     : tensor [B, 1, N, N, N]  ∈ [-1, 1]  (multiply by π for radians)
         """
         # Shared encoder
-        s1 = self.enc1(x)                  # [B, C, N, N, N]
-        s2 = self.enc2(s1)                 # [B, 2C, N/2, N/2, N/2]
-        s3 = self.enc3(s2)                 # [B, 4C, N/4, N/4, N/4]
-        b = self.bottleneck(s3)            # [B, 8C, N/8, N/8, N/8]
+        s1 = self.enc1(x)  # [B, C, N, N, N]
+        s2 = self.enc2(s1)  # [B, 2C, N/2, N/2, N/2]
+        s3 = self.enc3(s2)  # [B, 4C, N/4, N/4, N/4]
+        b = self.bottleneck(s3)  # [B, 8C, N/8, N/8, N/8]
 
         # Dual decoders
         amplitude = self.amp_decoder(b, s1, s2, s3)
@@ -215,6 +223,7 @@ class AutoPhaseNet3D(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Physics forward model (used during training)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class PhysicsForwardModel(nn.Module):
     """
@@ -260,7 +269,7 @@ class PhysicsForwardModel(nn.Module):
         shape_support = torch.sigmoid((amp_norm - self.threshold) * 25.0)
 
         # 2. Form complex object:  A(r) · S(r) · e^{iφ(r)}
-        phase_rad = phase * torch.pi   # [-π, π]
+        phase_rad = phase * torch.pi  # [-π, π]
         real = amplitude * shape_support * torch.cos(phase_rad)
         imag = amplitude * shape_support * torch.sin(phase_rad)
         obj = torch.complex(real.squeeze(1), imag.squeeze(1))
@@ -279,6 +288,7 @@ class PhysicsForwardModel(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unsupervised loss (AutoPhaseNN's MAE on sqrt(intensity))
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class UnsupervisedBCDILoss(nn.Module):
     """
@@ -327,22 +337,30 @@ class UnsupervisedBCDILoss(nn.Module):
         dict with 'total', 'mae_diff', and optional regularizer values.
         """
         # Normalize to match scales (AutoPhaseNN normalizes to max=1)
-        pred_norm = pred_diff_mag / (pred_diff_mag.amax(dim=(2,3,4), keepdim=True) + 1e-8)
-        meas_norm = measured_diff_mag / (measured_diff_mag.amax(dim=(2,3,4), keepdim=True) + 1e-8)
+        pred_norm = pred_diff_mag / (
+            pred_diff_mag.amax(dim=(2, 3, 4), keepdim=True) + 1e-8
+        )
+        meas_norm = measured_diff_mag / (
+            measured_diff_mag.amax(dim=(2, 3, 4), keepdim=True) + 1e-8
+        )
 
         # Main loss: MAE on normalized magnitudes
         mae = torch.abs(pred_norm - meas_norm).mean()
         total = mae
-        result = {'mae_diff': mae}
+        result = {"mae_diff": mae}
 
         # Optional regularizers
         if self.support_smoothness > 0 and shape_support is not None:
             dx = (shape_support[:, :, 1:] - shape_support[:, :, :-1]).abs().mean()
             dy = (shape_support[:, :, :, 1:] - shape_support[:, :, :, :-1]).abs().mean()
-            dz = (shape_support[:, :, :, :, 1:] - shape_support[:, :, :, :, :-1]).abs().mean()
+            dz = (
+                (shape_support[:, :, :, :, 1:] - shape_support[:, :, :, :, :-1])
+                .abs()
+                .mean()
+            )
             sm = (dx + dy + dz) / 3.0
             total = total + self.support_smoothness * sm
-            result['support_smoothness'] = sm
+            result["support_smoothness"] = sm
 
         if self.tv_phase > 0 and phase is not None and shape_support is not None:
             # TV on phase, weighted by shape support (gradients only matter inside)
@@ -350,19 +368,22 @@ class UnsupervisedBCDILoss(nn.Module):
             dx = ((phase[:, :, 1:] - phase[:, :, :-1]) ** 2 * w).mean()
             w = (shape_support[:, :, :, :-1] * shape_support[:, :, :, 1:]).detach()
             dy = ((phase[:, :, :, 1:] - phase[:, :, :, :-1]) ** 2 * w).mean()
-            w = (shape_support[:, :, :, :, :-1] * shape_support[:, :, :, :, 1:]).detach()
+            w = (
+                shape_support[:, :, :, :, :-1] * shape_support[:, :, :, :, 1:]
+            ).detach()
             dz = ((phase[:, :, :, :, 1:] - phase[:, :, :, :, :-1]) ** 2 * w).mean()
             tv = (dx + dy + dz) / 3.0
             total = total + self.tv_phase * tv
-            result['tv_phase'] = tv
+            result["tv_phase"] = tv
 
-        result['total'] = total
+        result["total"] = total
         return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Utilities
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -371,16 +392,16 @@ def count_parameters(model: nn.Module) -> int:
 def model_summary(model: AutoPhaseNet3D, grid_size: int = 64):
     n = count_parameters(model)
     print(f"\n{'='*52}")
-    print(f"  AutoPhaseNet3D (dual-decoder)")
+    print("  AutoPhaseNet3D (dual-decoder)")
     print(f"{'='*52}")
     print(f"  Parameters:       {n:,}")
     print(f"  Grid size:        {grid_size}³")
     print(f"  Enforce ovsmp:    {model.enforce_oversampling}")
-    print(f"  Outputs:          amplitude ∈ [0,1], phase ∈ [-1,1]×π")
+    print("  Outputs:          amplitude ∈ [0,1], phase ∈ [-1,1]×π")
     print(f"{'='*52}\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Smoke test
     model = AutoPhaseNet3D(base_channels=32)
     model_summary(model, 64)

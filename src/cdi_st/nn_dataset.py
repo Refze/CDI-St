@@ -27,12 +27,13 @@ Usage:
 """
 
 from __future__ import annotations
-import os, json
+
+from pathlib import Path
+from typing import Tuple
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
-from pathlib import Path
-from typing import Optional, Tuple
+from torch.utils.data import DataLoader, Dataset, random_split
 
 
 class BCDIDataset(Dataset):
@@ -71,7 +72,7 @@ class BCDIDataset(Dataset):
         # Find all .npz files
         self.files = sorted(self.data_dir.glob("sample_*.npz"))
         # Filter out metadata JSONs
-        self.files = [f for f in self.files if f.suffix == '.npz']
+        self.files = [f for f in self.files if f.suffix == ".npz"]
 
         if max_samples is not None:
             self.files = self.files[:max_samples]
@@ -92,9 +93,9 @@ class BCDIDataset(Dataset):
 
         # Load arrays
         data = np.load(fpath)
-        amplitude = data['amplitude'].astype(np.float32)    # [N, N, N]
-        phase = data['phase_true'].astype(np.float32)        # [N, N, N]
-        support = data['support'].astype(np.float32)         # [N, N, N]
+        amplitude = data["amplitude"].astype(np.float32)  # [N, N, N]
+        phase = data["phase_true"].astype(np.float32)  # [N, N, N]
+        support = data["support"].astype(np.float32)  # [N, N, N]
 
         # ── Preprocessing ─────────────────────────────────────────────────
 
@@ -123,11 +124,11 @@ class BCDIDataset(Dataset):
         support_tensor = torch.from_numpy(support[np.newaxis]).float()
 
         return {
-            'input': input_tensor,
-            'target_phase': phase_tensor,
-            'support': support_tensor,
-            'amp_scale': amp_scale,
-            'file': str(fpath.name),
+            "input": input_tensor,
+            "target_phase": phase_tensor,
+            "support": support_tensor,
+            "amp_scale": amp_scale,
+            "file": str(fpath.name),
         }
 
     def _augment(
@@ -164,7 +165,9 @@ class BCDIDataset(Dataset):
         # Small additive noise on input (simulates measurement noise)
         if rng.random() < 0.3:
             noise_level = rng.uniform(0.005, 0.02)
-            log_amp = log_amp + rng.normal(0, noise_level, log_amp.shape).astype(np.float32)
+            log_amp = log_amp + rng.normal(0, noise_level, log_amp.shape).astype(
+                np.float32
+            )
             log_amp = np.clip(log_amp, 0, 1)
 
         # Ensure contiguous arrays after rot/flip
@@ -226,16 +229,26 @@ def create_dataloaders(
     train_ds.dataset = BCDIDataset(data_dir, augment=True, max_samples=max_samples)
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, drop_last=True,
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True,
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
     )
     test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True,
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
     )
 
     print(f"  Train: {n_train}  Val: {n_val}  Test: {n_test}")
@@ -244,10 +257,11 @@ def create_dataloaders(
     return train_loader, val_loader, test_loader
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Quick test
     import sys
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else './training_data'
+
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else "./training_data"
     ds = BCDIDataset(data_dir, augment=True)
     print(f"Dataset size: {len(ds)}")
 
@@ -256,5 +270,7 @@ if __name__ == '__main__':
     print(f"Phase shape:   {sample['target_phase'].shape}")
     print(f"Support shape: {sample['support'].shape}")
     print(f"Input range:   [{sample['input'].min():.3f}, {sample['input'].max():.3f}]")
-    print(f"Phase range:   [{sample['target_phase'].min():.3f}, {sample['target_phase'].max():.3f}]")
+    print(
+        f"Phase range:   [{sample['target_phase'].min():.3f}, {sample['target_phase'].max():.3f}]"
+    )
     print(f"Support sum:   {sample['support'].sum():.0f} voxels")

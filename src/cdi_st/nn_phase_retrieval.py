@@ -38,35 +38,39 @@ Usage:
 """
 
 from __future__ import annotations
+
 import time
+from dataclasses import dataclass
+from typing import List
+
 import numpy as np
 import torch
-from dataclasses import dataclass, field
-from typing import Optional, List
 
 from .nn_phase_model import PhaseUNet3D
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Data classes
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class ReconstructionResult:
     """Container for phase retrieval results."""
-    object_3d: np.ndarray          # Complex object ρ·e^{iφ}, shape [N,N,N]
-    phase: np.ndarray              # Phase field, shape [N,N,N]
-    amplitude: np.ndarray          # |ρ|, shape [N,N,N]
-    support: np.ndarray            # Final support mask, shape [N,N,N]
-    error_metric: List[float]      # R-factor at each iteration
-    method: str = ''               # 'nn_only', 'classical', 'hybrid'
-    elapsed_seconds: float = 0.0   # Wall time
-    n_iterations: int = 0          # Total iterations
+
+    object_3d: np.ndarray  # Complex object ρ·e^{iφ}, shape [N,N,N]
+    phase: np.ndarray  # Phase field, shape [N,N,N]
+    amplitude: np.ndarray  # |ρ|, shape [N,N,N]
+    support: np.ndarray  # Final support mask, shape [N,N,N]
+    error_metric: List[float]  # R-factor at each iteration
+    method: str = ""  # 'nn_only', 'classical', 'hybrid'
+    elapsed_seconds: float = 0.0  # Wall time
+    n_iterations: int = 0  # Total iterations
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Phase retrieval algorithms (pure NumPy, no ML dependency)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _fft3(x):
     """Centered 3D FFT."""
@@ -105,7 +109,7 @@ def _modulus_projection(obj, measured_amplitude):
     return _ifft3(F_constrained)
 
 
-def _support_projection(obj, support, mode='er', beta=0.9, obj_prev=None):
+def _support_projection(obj, support, mode="er", beta=0.9, obj_prev=None):
     """
     Real-space support constraint.
 
@@ -127,13 +131,13 @@ def _support_projection(obj, support, mode='er', beta=0.9, obj_prev=None):
     """
     inside = support > 0.5
 
-    if mode == 'er':
+    if mode == "er":
         # Error Reduction: zero outside support
         result = obj.copy()
         result[~inside] = 0
         return result
 
-    elif mode == 'hio':
+    elif mode == "hio":
         # Hybrid Input-Output (Fienup 1982)
         # Inside support: keep modulus-projected value
         # Outside support: x_n - β · P_M x_n
@@ -147,7 +151,7 @@ def _support_projection(obj, support, mode='er', beta=0.9, obj_prev=None):
         result[~inside] = obj_prev[~inside] - beta * obj[~inside]
         return result
 
-    elif mode == 'raar':
+    elif mode == "raar":
         # RAAR (Luke 2005)
         # x_{n+1} = β/2 (R_S R_M + I) x_n + (1-β) P_M x_n
         #
@@ -200,6 +204,7 @@ def _shrink_wrap(obj, support, threshold=0.10, sigma=2.0, max_support_fraction=0
     which is important when the initial support guess is too large.
     """
     from scipy.ndimage import gaussian_filter
+
     amp = np.abs(obj)
     blurred = gaussian_filter(amp, sigma=sigma)
     new_support = (blurred > threshold * blurred.max()).astype(np.float32)
@@ -212,7 +217,7 @@ def _shrink_wrap(obj, support, threshold=0.10, sigma=2.0, max_support_fraction=0
         # by raising the effective threshold
         flat = blurred.flatten()
         # Find threshold value that keeps exactly max_voxels
-        sorted_vals = np.partition(flat, -int(max_voxels))[-int(max_voxels):]
+        sorted_vals = np.partition(flat, -int(max_voxels))[-int(max_voxels) :]
         adaptive_threshold = sorted_vals.min()
         new_support = (blurred >= adaptive_threshold).astype(np.float32)
 
@@ -233,7 +238,7 @@ def run_phase_retrieval(
     shrink_wrap_threshold: float = 0.10,
     shrink_wrap_sigma: float = 2.0,
     max_support_fraction: float = 0.30,
-    algorithm: str = 'hybrid',
+    algorithm: str = "hybrid",
     progress_cb=None,
 ) -> ReconstructionResult:
     """
@@ -276,13 +281,13 @@ def run_phase_retrieval(
     # threshold gives a too-loose support. We use a tighter threshold AND
     # cap the support fraction to a sensible upper bound.
     if support is None:
-        auto_corr = np.abs(_ifft3(measured_amplitude ** 2))
+        auto_corr = np.abs(_ifft3(measured_amplitude**2))
         ac_max = auto_corr.max()
         # Try increasingly strict thresholds until support is at most 30% of grid
         # (15% × 2 since autocorr is 2× object linearly, so 8× by volume → use 30% as safe upper)
         n_total = auto_corr.size
         for thr in [0.05, 0.10, 0.15, 0.25, 0.40, 0.60]:
-            sup_try = (auto_corr > thr * ac_max)
+            sup_try = auto_corr > thr * ac_max
             if sup_try.sum() < n_total * 0.30:
                 support = sup_try.astype(np.float32)
                 break
@@ -306,7 +311,9 @@ def run_phase_retrieval(
         rough = np.abs(_ifft3(measured_amplitude))
         rough = rough * (support > 0.5)
         # Scale to match measured magnitude
-        seed_obj = rough * np.exp(1j * (initial_phase if initial_phase is not None else 0))
+        seed_obj = rough * np.exp(
+            1j * (initial_phase if initial_phase is not None else 0)
+        )
         F_seed = _fft3(seed_obj)
         F_seed_max = float(np.abs(F_seed).max())
         meas_max = float(measured_amplitude.max())
@@ -320,20 +327,20 @@ def run_phase_retrieval(
     # Track best solution
     best_obj = obj.copy()
     best_support = support.copy()
-    best_r = float('inf')
+    best_r = float("inf")
 
     errors = []
 
     # Determine schedule
-    if algorithm == 'er':
-        schedule = ['er'] * n_er
-    elif algorithm == 'hio':
-        schedule = ['hio'] * n_hio + ['er'] * n_er
-    elif algorithm == 'raar':
-        schedule = ['raar'] * n_raar + ['er'] * n_er
-    elif algorithm == 'hybrid':
+    if algorithm == "er":
+        schedule = ["er"] * n_er
+    elif algorithm == "hio":
+        schedule = ["hio"] * n_hio + ["er"] * n_er
+    elif algorithm == "raar":
+        schedule = ["raar"] * n_raar + ["er"] * n_er
+    elif algorithm == "hybrid":
         # Standard hybrid: HIO (escape minima) → RAAR (smooth) → ER (polish)
-        schedule = ['hio'] * n_hio + ['raar'] * n_raar + ['er'] * n_er
+        schedule = ["hio"] * n_hio + ["raar"] * n_raar + ["er"] * n_er
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
@@ -370,12 +377,15 @@ def run_phase_retrieval(
         obj = obj_new
 
         # Shrink-wrap support update (only during HIO/RAAR phase, not ER)
-        if (use_shrink_wrap
-                and (i + 1) % shrink_wrap_interval == 0
-                and i > 0
-                and mode != 'er'):
+        if (
+            use_shrink_wrap
+            and (i + 1) % shrink_wrap_interval == 0
+            and i > 0
+            and mode != "er"
+        ):
             support = _shrink_wrap(
-                obj, support,
+                obj,
+                support,
                 threshold=shrink_wrap_threshold,
                 sigma=shrink_wrap_sigma,
                 max_support_fraction=max_support_fraction,
@@ -389,7 +399,7 @@ def run_phase_retrieval(
     final_support = best_support.copy()
     for i in range(5):
         final_obj = _modulus_projection(final_obj, measured_amplitude)
-        final_obj = _support_projection(final_obj, final_support, mode='er')
+        final_obj = _support_projection(final_obj, final_support, mode="er")
 
     # Final R-factor on the cleaned best
     F_final = _fft3(final_obj)
@@ -412,6 +422,7 @@ def run_phase_retrieval(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Hybrid NN + iterative retriever
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class HybridPhaseRetriever:
     """
@@ -449,7 +460,7 @@ class HybridPhaseRetriever:
         device: str = None,
     ):
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
@@ -460,8 +471,8 @@ class HybridPhaseRetriever:
     def _load_model(self, path: str, base_channels: int):
         """Load trained U-Net from checkpoint."""
         self.model = PhaseUNet3D(in_channels=1, base_channels=base_channels)
-        ckpt = torch.load(path, map_location='cpu', weights_only=False)
-        self.model.load_state_dict(ckpt['model_state_dict'])
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()
         print(f"Loaded model from {path} (device={self.device})")
@@ -506,7 +517,7 @@ class HybridPhaseRetriever:
         self,
         diffraction: np.ndarray,
         support: np.ndarray = None,
-        mode: str = 'hybrid',
+        mode: str = "hybrid",
         n_raar: int = 100,
         n_er: int = 20,
         beta: float = 0.87,
@@ -542,12 +553,12 @@ class HybridPhaseRetriever:
         t0 = time.time()
         amplitude = np.sqrt(np.maximum(diffraction, 0)).astype(np.float32)
 
-        if mode == 'nn_only':
+        if mode == "nn_only":
             # ── Fast NN-only prediction ───────────────────────────────────
             phase = self.predict_phase_nn(diffraction)
 
             if support is None:
-                auto_corr = np.abs(_ifft3(amplitude ** 2))
+                auto_corr = np.abs(_ifft3(amplitude**2))
                 support = (auto_corr > 0.04 * auto_corr.max()).astype(np.float32)
 
             obj = support * np.exp(1j * phase)
@@ -560,12 +571,12 @@ class HybridPhaseRetriever:
                 amplitude=np.abs(obj),
                 support=support,
                 error_metric=[r],
-                method='nn_only',
+                method="nn_only",
                 elapsed_seconds=time.time() - t0,
                 n_iterations=0,
             )
 
-        elif mode == 'hybrid':
+        elif mode == "hybrid":
             # ── NN initialization + short iterative refinement ────────────
             print("  [1/3] NN phase prediction...")
             initial_phase = self.predict_phase_nn(diffraction)
@@ -583,10 +594,10 @@ class HybridPhaseRetriever:
                 use_shrink_wrap=use_shrink_wrap,
                 progress_cb=progress_cb,
             )
-            result.method = 'hybrid'
+            result.method = "hybrid"
             result.elapsed_seconds = time.time() - t0
 
-        elif mode == 'classical':
+        elif mode == "classical":
             # ── Standard random-start approach ────────────────────────────
             # Use more iterations to compensate for random start
             if n_raar < 200:
@@ -606,14 +617,18 @@ class HybridPhaseRetriever:
                 use_shrink_wrap=use_shrink_wrap,
                 progress_cb=progress_cb,
             )
-            result.method = 'classical'
+            result.method = "classical"
             result.elapsed_seconds = time.time() - t0
 
         else:
-            raise ValueError(f"Unknown mode: {mode}. Use 'hybrid', 'nn_only', or 'classical'.")
+            raise ValueError(
+                f"Unknown mode: {mode}. Use 'hybrid', 'nn_only', or 'classical'."
+            )
 
-        print(f"  Done in {result.elapsed_seconds:.2f}s  "
-              f"R-factor={result.error_metric[-1]:.4f}")
+        print(
+            f"  Done in {result.elapsed_seconds:.2f}s  "
+            f"R-factor={result.error_metric[-1]:.4f}"
+        )
 
         return result
 
@@ -631,20 +646,24 @@ class HybridPhaseRetriever:
         results = {}
 
         print("\n── NN-only reconstruction ──")
-        results['nn_only'] = self.reconstruct(
-            diffraction, support, mode='nn_only'
-        )
+        results["nn_only"] = self.reconstruct(diffraction, support, mode="nn_only")
 
         print("\n── Hybrid (NN + 100 RAAR + 20 ER) ──")
-        results['hybrid'] = self.reconstruct(
-            diffraction, support, mode='hybrid',
-            n_raar=100, n_er=20,
+        results["hybrid"] = self.reconstruct(
+            diffraction,
+            support,
+            mode="hybrid",
+            n_raar=100,
+            n_er=20,
         )
 
         print("\n── Classical (random + 500 RAAR + 100 ER) ──")
-        results['classical'] = self.reconstruct(
-            diffraction, support, mode='classical',
-            n_raar=500, n_er=100,
+        results["classical"] = self.reconstruct(
+            diffraction,
+            support,
+            mode="classical",
+            n_raar=500,
+            n_er=100,
         )
 
         # Summary
@@ -665,43 +684,57 @@ class HybridPhaseRetriever:
 # Standalone usage
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description='BCDI phase retrieval')
-    parser.add_argument('--input', type=str, required=True,
-                        help='Path to .npz file with diffraction data')
-    parser.add_argument('--model', type=str, default='checkpoints/best_model.pt',
-                        help='Path to trained U-Net checkpoint')
-    parser.add_argument('--mode', type=str, default='hybrid',
-                        choices=['hybrid', 'nn_only', 'classical', 'compare'],
-                        help='Reconstruction mode')
-    parser.add_argument('--output', type=str, default='reconstruction.npz',
-                        help='Output file')
-    parser.add_argument('--n_raar', type=int, default=100)
-    parser.add_argument('--n_er', type=int, default=20)
-    parser.add_argument('--base_channels', type=int, default=32)
+    parser = argparse.ArgumentParser(description="BCDI phase retrieval")
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Path to .npz file with diffraction data",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="checkpoints/best_model.pt",
+        help="Path to trained U-Net checkpoint",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="hybrid",
+        choices=["hybrid", "nn_only", "classical", "compare"],
+        help="Reconstruction mode",
+    )
+    parser.add_argument(
+        "--output", type=str, default="reconstruction.npz", help="Output file"
+    )
+    parser.add_argument("--n_raar", type=int, default=100)
+    parser.add_argument("--n_er", type=int, default=20)
+    parser.add_argument("--base_channels", type=int, default=32)
     args = parser.parse_args()
 
     # Load data
     data = np.load(args.input)
-    diffraction = data['diffraction']
-    support = data.get('support', None)
+    diffraction = data["diffraction"]
+    support = data.get("support", None)
 
     # Create retriever
-    model_path = args.model if args.mode != 'classical' else None
+    model_path = args.model if args.mode != "classical" else None
     retriever = HybridPhaseRetriever(
         model_path=model_path,
         base_channels=args.base_channels,
     )
 
-    if args.mode == 'compare':
+    if args.mode == "compare":
         results = retriever.compare_methods(diffraction, support)
         # Save hybrid result
-        r = results['hybrid']
+        r = results["hybrid"]
     else:
         r = retriever.reconstruct(
-            diffraction, support,
+            diffraction,
+            support,
             mode=args.mode,
             n_raar=args.n_raar,
             n_er=args.n_er,

@@ -34,11 +34,12 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, json
-import numpy as np
-from pathlib import Path
-from typing import Optional, Tuple
 
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HDF5 structure discovery
@@ -47,17 +48,17 @@ from typing import Optional, Tuple
 # Common paths where BCDI diffraction volumes live in different beamline formats
 KNOWN_PATHS = [
     # ID01 / BLISS — most common for user
-    '/entry_0000/measurement/merlin/data',
-    '/entry_0000/measurement/eiger2M/data',
-    '/entry_0000/measurement/mpx1x4/data',
-    '/entry_0000/measurement/maxipix/data',
+    "/entry_0000/measurement/merlin/data",
+    "/entry_0000/measurement/eiger2M/data",
+    "/entry_0000/measurement/mpx1x4/data",
+    "/entry_0000/measurement/maxipix/data",
     # 34-ID-C (APS)
-    '/entry1/instrument/detector/data',
+    "/entry1/instrument/detector/data",
     # Generic
-    '/data',
-    '/entry/data/data',
-    '/intensity',
-    '/diffraction',
+    "/data",
+    "/entry/data/data",
+    "/intensity",
+    "/diffraction",
 ]
 
 
@@ -73,11 +74,11 @@ def inspect_h5(path: str, max_depth: int = 6):
     print("=" * 62)
 
     def _walk(name, obj):
-        depth = name.count('/')
+        depth = name.count("/")
         if depth > max_depth:
             return
-        indent = '  ' * depth
-        if hasattr(obj, 'shape'):
+        indent = "  " * depth
+        if hasattr(obj, "shape"):
             s = f"{indent}{name}  shape={obj.shape}  dtype={obj.dtype}"
             # Highlight likely candidates: 3D float/int arrays
             if len(obj.shape) == 3 and obj.shape[0] > 10:
@@ -88,7 +89,7 @@ def inspect_h5(path: str, max_depth: int = 6):
         else:
             print(f"{indent}{name}/")
 
-    with h5py.File(path, 'r') as f:
+    with h5py.File(path, "r") as f:
         f.visititems(_walk)
     print("=" * 62)
 
@@ -103,15 +104,16 @@ def find_diffraction_dataset(h5_file):
     for p in KNOWN_PATHS:
         if p in h5_file:
             ds = h5_file[p]
-            if hasattr(ds, 'shape') and len(ds.shape) >= 3:
+            if hasattr(ds, "shape") and len(ds.shape) >= 3:
                 return p, ds
 
     # Fall back: walk the tree and pick the largest 3D dataset
     candidates = []
+
     def _collect(name, obj):
-        if hasattr(obj, 'shape') and len(obj.shape) == 3:
+        if hasattr(obj, "shape") and len(obj.shape) == 3:
             sz = int(np.prod(obj.shape))
-            if sz > 10 ** 5:  # arbitrary minimum size
+            if sz > 10**5:  # arbitrary minimum size
                 candidates.append((sz, name, obj))
 
     h5_file.visititems(_collect)
@@ -127,8 +129,8 @@ def find_diffraction_dataset(h5_file):
 # Preprocessing steps
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def mask_detector_gaps(volume: np.ndarray,
-                          detector: str = 'auto') -> np.ndarray:
+
+def mask_detector_gaps(volume: np.ndarray, detector: str = "auto") -> np.ndarray:
     """
     Mask the inter-chip gaps of multi-chip BCDI detectors.
 
@@ -146,23 +148,22 @@ def mask_detector_gaps(volume: np.ndarray,
         - 1062×1028 → Eiger 2M
         - other → use heuristic detection
     """
-    from scipy.ndimage import median_filter
 
     out = volume.copy().astype(np.float32)
     Nz, Ny, Nx = out.shape
 
-    if detector == 'auto':
+    if detector == "auto":
         if Ny == 516 and Nx == 516:
-            detector = 'maxipix'
+            detector = "maxipix"
         elif Ny >= 1000 and Nx >= 1000:
-            detector = 'eiger2M'
+            detector = "eiger2M"
         else:
-            detector = 'unknown'
+            detector = "unknown"
 
-    if detector == 'maxipix':
+    if detector == "maxipix":
         gap_rows = list(range(255, 261))
         gap_cols = list(range(255, 261))
-    elif detector == 'eiger2M':
+    elif detector == "eiger2M":
         # Eiger 2M has multiple module gaps; this covers the central one.
         # For full preprocessing of Eiger 2M, use cdiutils directly.
         gap_rows = list(range(513, 551))
@@ -203,7 +204,7 @@ def mask_detector_gaps(volume: np.ndarray,
     # Implementation: iterate only over the gap voxels (they're a small fraction
     # of the data, ~2% for Maxipix), and for each one sample a neighborhood
     # in the same rocking frame.
-    half_window = 9   # 19×19 window — wide enough to bridge a 6-pixel gap
+    half_window = 9  # 19×19 window — wide enough to bridge a 6-pixel gap
     for z in range(Nz):
         gap_z = gap_mask[z]
         if not gap_z.any():
@@ -211,7 +212,7 @@ def mask_detector_gaps(volume: np.ndarray,
         non_gap = ~gap_z
         frame = out[z]
         gap_indices = np.argwhere(gap_z)
-        for (gy, gx) in gap_indices:
+        for gy, gx in gap_indices:
             y0 = max(0, gy - half_window)
             y1 = min(Ny, gy + half_window + 1)
             x0 = max(0, gx - half_window)
@@ -241,6 +242,7 @@ def remove_hot_pixels(volume: np.ndarray, threshold_sigma: float = 50.0) -> np.n
     are 100× the median (single bright pixels surrounded by dark).
     """
     from scipy.ndimage import median_filter
+
     # 3D median filter — more robust against the peak itself
     local_median = median_filter(volume, size=3)
     # Only clip pixels that are >100× their immediate neighbors AND
@@ -253,9 +255,9 @@ def remove_hot_pixels(volume: np.ndarray, threshold_sigma: float = 50.0) -> np.n
     return cleaned
 
 
-def find_bragg_peak_box(volume: np.ndarray,
-                          intensity_threshold_pct: float = 1.0,
-                          margin_voxels: int = 8) -> tuple:
+def find_bragg_peak_box(
+    volume: np.ndarray, intensity_threshold_pct: float = 1.0, margin_voxels: int = 8
+) -> tuple:
     """
     Locate the Bragg peak by finding the 3D bounding box of voxels above
     a threshold of the maximum intensity. Returns (z_slice, y_slice, x_slice).
@@ -270,15 +272,18 @@ def find_bragg_peak_box(volume: np.ndarray,
     """
     # Smooth lightly for robust peak finding (3-pixel Gaussian)
     from scipy.ndimage import gaussian_filter
+
     smoothed = gaussian_filter(volume.astype(np.float32), sigma=2.0)
 
     peak_max = float(smoothed.max())
     if peak_max <= 0:
         # Empty volume — fallback to center
         cz, cy, cx = [s // 2 for s in volume.shape]
-        return (slice(max(0, cz-32), cz+32),
-                slice(max(0, cy-32), cy+32),
-                slice(max(0, cx-32), cx+32))
+        return (
+            slice(max(0, cz - 32), cz + 32),
+            slice(max(0, cy - 32), cy + 32),
+            slice(max(0, cx - 32), cx + 32),
+        )
 
     # Find ALL voxels above threshold
     threshold = (intensity_threshold_pct / 100.0) * peak_max
@@ -375,6 +380,7 @@ def remove_beamstop_streaks(volume: np.ndarray) -> np.ndarray:
 # Main loading function
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def load_h5_diffraction(
     path: str,
     dataset_path: str = None,
@@ -425,7 +431,7 @@ def load_h5_diffraction(
     except ImportError:
         raise ImportError("h5py required. Install with: pip install h5py")
 
-    with h5py.File(path, 'r') as f:
+    with h5py.File(path, "r") as f:
         # Find the dataset
         if dataset_path is not None:
             if dataset_path not in f:
@@ -435,9 +441,11 @@ def load_h5_diffraction(
         else:
             dpath, ds = find_diffraction_dataset(f)
             if ds is None:
-                raise ValueError(f"Could not auto-detect diffraction data in {path}. "
-                                  "Run with --inspect to see structure, then use "
-                                  "--dataset_path to specify it explicitly.")
+                raise ValueError(
+                    f"Could not auto-detect diffraction data in {path}. "
+                    "Run with --inspect to see structure, then use "
+                    "--dataset_path to specify it explicitly."
+                )
 
         if verbose:
             print(f"  Loaded dataset: {dpath}  shape={ds.shape}  dtype={ds.dtype}")
@@ -454,15 +462,17 @@ def load_h5_diffraction(
         # Optional frame limiting
         if max_frames is not None and ds_arr.shape[0] > max_frames:
             start = (ds_arr.shape[0] - max_frames) // 2
-            ds_arr = ds_arr[start:start + max_frames]
+            ds_arr = ds_arr[start : start + max_frames]
 
         volume = np.asarray(ds_arr, dtype=np.float32)
 
     # ── Preprocessing pipeline ────────────────────────────────────────────
     if verbose:
-        print(f"  Raw volume:    shape={volume.shape}  "
-              f"min={volume.min():.2e} max={volume.max():.2e} "
-              f"mean={volume.mean():.2e}")
+        print(
+            f"  Raw volume:    shape={volume.shape}  "
+            f"min={volume.min():.2e} max={volume.max():.2e} "
+            f"mean={volume.mean():.2e}"
+        )
 
     # Remove negative values (sometimes present from background subtraction)
     volume = np.maximum(volume, 0)
@@ -474,10 +484,12 @@ def load_h5_diffraction(
     #   - Get misidentified as "streaks" by the streak detector
     #   - Break the Fourier transform during reconstruction
     # cdiutils and BCDI-utils both fill these gaps via local median.
-    volume = mask_detector_gaps(volume, detector='auto')
+    volume = mask_detector_gaps(volume, detector="auto")
     if verbose:
-        print(f"  After gap mask: max={volume.max():.2e}  min_nonzero="
-              f"{volume[volume > 0].min() if (volume > 0).any() else 0:.2e}")
+        print(
+            f"  After gap mask: max={volume.max():.2e}  min_nonzero="
+            f"{volume[volume > 0].min() if (volume > 0).any() else 0:.2e}"
+        )
 
     # Remove beamstop (very low intensity region gets zeroed)
     if beamstop_threshold > 0:
@@ -517,8 +529,10 @@ def load_h5_diffraction(
         N = target_size
         peak_idx = np.unravel_index(np.argmax(volume), volume.shape)
         center = (N // 2, N // 2, N // 2)
-        print(f"  Processed:     shape={volume.shape}  "
-              f"peak_max={volume.max():.2e}  total_counts={volume.sum():.2e}")
+        print(
+            f"  Processed:     shape={volume.shape}  "
+            f"peak_max={volume.max():.2e}  total_counts={volume.sum():.2e}"
+        )
         print(f"  Peak index:    {peak_idx} (target center {center})")
 
     return volume
@@ -527,6 +541,7 @@ def load_h5_diffraction(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Spec/EDF reader (ID01 native format, before BLISS h5)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def read_spec_scan(spec_path: str, scan_number: int) -> dict:
     """
@@ -556,6 +571,7 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
     try:
         # Try silx first (more modern, better maintained)
         from silx.io.specfile import SpecFile
+
         sf = SpecFile(spec_path)
         scan = sf[f"{scan_number}.1"]
         labels = scan.labels
@@ -564,13 +580,14 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
         # Header motors
         motor_names = scan.motor_names
         motor_positions = scan.motor_positions
-        result['header_motors'] = dict(zip(motor_names, motor_positions))
+        result["header_motors"] = dict(zip(motor_names, motor_positions))
     except ImportError:
         try:
             import spec
+
             h, d = spec.ReadSpec(spec_path, scan_number)
             result = dict(d)
-            result['header_motors'] = dict(h.get('motors', {}))
+            result["header_motors"] = dict(h.get("motors", {}))
         except ImportError:
             raise ImportError(
                 "Need either silx (pip install silx) or spec (pip install spec) "
@@ -578,34 +595,39 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
             )
 
     # Determine rocking axis: which motor varies most over the scan?
-    n_pts = len(result.get('mpx4inr', result.get(list(result.keys())[0])))
+    n_pts = len(result.get("mpx4inr", result.get(list(result.keys())[0])))
     rocking_type = None
-    if 'eta' in result and len(result['eta']) == n_pts:
-        eta_arr = np.asarray(result['eta'])
+    if "eta" in result and len(result["eta"]) == n_pts:
+        eta_arr = np.asarray(result["eta"])
         if eta_arr.std() > 0.01:
-            rocking_type = 'eta'
-    if rocking_type is None and 'phi' in result and len(result['phi']) == n_pts:
-        phi_arr = np.asarray(result['phi'])
+            rocking_type = "eta"
+    if rocking_type is None and "phi" in result and len(result["phi"]) == n_pts:
+        phi_arr = np.asarray(result["phi"])
         if phi_arr.std() > 0.01:
-            rocking_type = 'phi'
+            rocking_type = "phi"
 
     # Fill in fixed motors from header for rocking case
-    h_motors = result['header_motors']
-    if rocking_type == 'eta':
-        result['phi'] = np.full(n_pts, h_motors.get('phi', 0.0))
-        result['delta'] = np.full(n_pts, h_motors.get('del', h_motors.get('delta', 0.0)))
-        result['nu'] = np.full(n_pts, h_motors.get('nu', 0.0))
-    elif rocking_type == 'phi':
-        result['eta'] = np.full(n_pts, h_motors.get('eta', 0.0))
-        result['delta'] = np.full(n_pts, h_motors.get('del', h_motors.get('delta', 0.0)))
-        result['nu'] = np.full(n_pts, h_motors.get('nu', 0.0))
+    h_motors = result["header_motors"]
+    if rocking_type == "eta":
+        result["phi"] = np.full(n_pts, h_motors.get("phi", 0.0))
+        result["delta"] = np.full(
+            n_pts, h_motors.get("del", h_motors.get("delta", 0.0))
+        )
+        result["nu"] = np.full(n_pts, h_motors.get("nu", 0.0))
+    elif rocking_type == "phi":
+        result["eta"] = np.full(n_pts, h_motors.get("eta", 0.0))
+        result["delta"] = np.full(
+            n_pts, h_motors.get("del", h_motors.get("delta", 0.0))
+        )
+        result["nu"] = np.full(n_pts, h_motors.get("nu", 0.0))
 
-    result['rocking_type'] = rocking_type
+    result["rocking_type"] = rocking_type
     return result
 
 
-def read_edf_stack(edf_template: str, frame_numbers: list,
-                    detector_shape: tuple = (516, 516)) -> np.ndarray:
+def read_edf_stack(
+    edf_template: str, frame_numbers: list, detector_shape: tuple = (516, 516)
+) -> np.ndarray:
     """
     Read a stack of EDF (European Data Format) detector frames.
 
@@ -658,7 +680,7 @@ def load_spec_edf_scan(
     edf_template_name: str = "data_mpx4_%05d.edf.gz",
     target_size: int = 64,
     detector_shape: tuple = (516, 516),
-    detector: str = 'maxipix',
+    detector: str = "maxipix",
     verbose: bool = True,
 ) -> dict:
     """
@@ -702,13 +724,13 @@ def load_spec_edf_scan(
     if verbose:
         print(f"Reading SPEC file: {spec_path}, scan {scan_number}")
     spec_data = read_spec_scan(spec_path, scan_number)
-    rocking_type = spec_data['rocking_type']
+    rocking_type = spec_data["rocking_type"]
     if verbose:
         print(f"  Rocking axis: {rocking_type}")
 
     # 2. Load detector frames
     edf_template = os.path.join(edf_dir, edf_template_name)
-    frame_numbers = np.asarray(spec_data['mpx4inr']).astype(int)
+    frame_numbers = np.asarray(spec_data["mpx4inr"]).astype(int)
     if verbose:
         print(f"  Loading {len(frame_numbers)} EDF frames from {edf_dir}")
     volume = read_edf_stack(edf_template, frame_numbers, detector_shape)
@@ -728,19 +750,20 @@ def load_spec_edf_scan(
     cropped = crop_around_peak(volume, peak_center, target_size)
 
     result = {
-        'diffraction': cropped.astype(np.float32),
-        'eta': np.asarray(spec_data['eta']),
-        'phi': np.asarray(spec_data['phi']),
-        'nu': np.asarray(spec_data['nu']),
-        'delta': np.asarray(spec_data['delta']),
-        'rocking_type': rocking_type,
-        'frame_numbers': frame_numbers,
-        'header_motors': spec_data['header_motors'],
+        "diffraction": cropped.astype(np.float32),
+        "eta": np.asarray(spec_data["eta"]),
+        "phi": np.asarray(spec_data["phi"]),
+        "nu": np.asarray(spec_data["nu"]),
+        "delta": np.asarray(spec_data["delta"]),
+        "rocking_type": rocking_type,
+        "frame_numbers": frame_numbers,
+        "header_motors": spec_data["header_motors"],
     }
 
     # 5. Q-space orthogonalization with xrayutilities (optional)
     try:
         import xrayutilities as xu
+
         if verbose:
             print("  Computing q-space coordinates with xrayutilities...")
 
@@ -751,37 +774,44 @@ def load_spec_edf_scan(
         # Detector calibration (defaults — user can override if needed):
         beam_energy_eV = 13000.0
         cch1, cch2 = 207.11, 167.86  # detector center pixels
-        chpdeg = [406.3, 406.3]      # channels per degree
+        chpdeg = [406.3, 406.3]  # channels per degree
 
-        qconv = xu.experiment.QConversion(
-            ['y-', 'z-'], ['z-', 'y-'], [1, 0, 0]
+        qconv = xu.experiment.QConversion(["y-", "z-"], ["z-", "y-"], [1, 0, 0])
+        hxrd = xu.experiment.HXRD([1, 0, 0], [0, 0, 1], en=beam_energy_eV, qconv=qconv)
+        hxrd.Ang2Q.init_area(
+            "z-",
+            "y+",
+            cch1=cch1,
+            cch2=cch2,
+            Nch1=detector_shape[0],
+            Nch2=detector_shape[1],
+            chpdeg1=chpdeg[0],
+            chpdeg2=chpdeg[1],
         )
-        hxrd = xu.experiment.HXRD([1, 0, 0], [0, 0, 1],
-                                    en=beam_energy_eV, qconv=qconv)
-        hxrd.Ang2Q.init_area('z-', 'y+',
-                              cch1=cch1, cch2=cch2,
-                              Nch1=detector_shape[0], Nch2=detector_shape[1],
-                              chpdeg1=chpdeg[0], chpdeg2=chpdeg[1])
 
-        qx, qy, qz = hxrd.Ang2Q.area(result['eta'], result['phi'],
-                                       result['nu'], result['delta'])
+        qx, qy, qz = hxrd.Ang2Q.area(
+            result["eta"], result["phi"], result["nu"], result["delta"]
+        )
         # qx, qy, qz are 3D arrays of q-coordinates per pixel.
         # For voxel size estimation, take the mean step in each direction.
         # (Proper interpolation onto orthogonal grid would use Gridder3D.)
         dqx = float(np.mean(np.diff(qx, axis=0)))
         dqy = float(np.mean(np.diff(qy, axis=1)))
         dqz = float(np.mean(np.diff(qz, axis=2))) if qz.shape[2] > 1 else 1.0
-        result['q_step_inv_A'] = (abs(dqx), abs(dqy), abs(dqz))
+        result["q_step_inv_A"] = (abs(dqx), abs(dqy), abs(dqz))
         # Real-space voxel size: dr = 2π / (N · dq), in nm
         # (10× factor converts Å to nm)
         N = target_size
-        result['voxel_size_nm'] = np.array([
-            2 * np.pi / (N * abs(dqx) * 10) if abs(dqx) > 1e-12 else 1.0,
-            2 * np.pi / (N * abs(dqy) * 10) if abs(dqy) > 1e-12 else 1.0,
-            2 * np.pi / (N * abs(dqz) * 10) if abs(dqz) > 1e-12 else 1.0,
-        ], dtype=np.float32)
+        result["voxel_size_nm"] = np.array(
+            [
+                2 * np.pi / (N * abs(dqx) * 10) if abs(dqx) > 1e-12 else 1.0,
+                2 * np.pi / (N * abs(dqy) * 10) if abs(dqy) > 1e-12 else 1.0,
+                2 * np.pi / (N * abs(dqz) * 10) if abs(dqz) > 1e-12 else 1.0,
+            ],
+            dtype=np.float32,
+        )
         if verbose:
-            vn = result['voxel_size_nm']
+            vn = result["voxel_size_nm"]
             print(f"  Voxel pitch: ({vn[0]:.3f}, {vn[1]:.3f}, {vn[2]:.3f}) nm")
     except ImportError:
         if verbose:
@@ -813,16 +843,16 @@ def spec_edf_to_npz(
         target_size=target_size,
     )
     save_dict = {
-        'diffraction': res['diffraction'],
-        'amplitude': np.sqrt(np.maximum(res['diffraction'], 0)),
-        'eta': res['eta'],
-        'phi': res['phi'],
-        'nu': res['nu'],
-        'delta': res['delta'],
-        'rocking_type': res['rocking_type'] or 'unknown',
+        "diffraction": res["diffraction"],
+        "amplitude": np.sqrt(np.maximum(res["diffraction"], 0)),
+        "eta": res["eta"],
+        "phi": res["phi"],
+        "nu": res["nu"],
+        "delta": res["delta"],
+        "rocking_type": res["rocking_type"] or "unknown",
     }
-    if 'voxel_size_nm' in res:
-        save_dict['voxel_size_nm'] = res['voxel_size_nm']
+    if "voxel_size_nm" in res:
+        save_dict["voxel_size_nm"] = res["voxel_size_nm"]
     np.savez_compressed(npz_path, **save_dict)
     print(f"  Saved: {npz_path}")
     return res
@@ -831,6 +861,7 @@ def spec_edf_to_npz(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Conversion script (experimental .h5 → training-compatible .npz)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def h5_to_npz(
     h5_path: str,
@@ -855,14 +886,14 @@ def h5_to_npz(
 
     # Also save metadata
     meta = {
-        'source_file': str(h5_path),
-        'source_dataset': dataset_path,
-        'target_size': target_size,
-        'is_experimental': True,
-        'has_ground_truth': False,
+        "source_file": str(h5_path),
+        "source_dataset": dataset_path,
+        "target_size": target_size,
+        "is_experimental": True,
+        "has_ground_truth": False,
     }
-    meta_path = Path(npz_path).parent / (Path(npz_path).stem + '_meta.json')
-    with open(meta_path, 'w') as f:
+    meta_path = Path(npz_path).parent / (Path(npz_path).stem + "_meta.json")
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"  Metadata: {meta_path}")
 
@@ -871,21 +902,30 @@ def h5_to_npz(
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Load BCDI diffraction data from experimental .h5 files'
+        description="Load BCDI diffraction data from experimental .h5 files"
     )
-    parser.add_argument('--input', type=str, required=True, help='Input .h5 file')
-    parser.add_argument('--output', type=str, default=None,
-                        help='Output .npz file (if not given, just inspect)')
-    parser.add_argument('--inspect', action='store_true',
-                        help='Just print the HDF5 structure and exit')
-    parser.add_argument('--dataset_path', type=str, default=None,
-                        help='HDF5 path to diffraction data (auto-detect if omitted)')
-    parser.add_argument('--target_size', type=int, default=64,
-                        help='Output grid size')
-    parser.add_argument('--max_depth', type=int, default=6,
-                        help='Max tree depth for --inspect')
+    parser.add_argument("--input", type=str, required=True, help="Input .h5 file")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output .npz file (if not given, just inspect)",
+    )
+    parser.add_argument(
+        "--inspect", action="store_true", help="Just print the HDF5 structure and exit"
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default=None,
+        help="HDF5 path to diffraction data (auto-detect if omitted)",
+    )
+    parser.add_argument("--target_size", type=int, default=64, help="Output grid size")
+    parser.add_argument(
+        "--max_depth", type=int, default=6, help="Max tree depth for --inspect"
+    )
     args = parser.parse_args()
 
     if args.inspect:
