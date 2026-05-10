@@ -270,6 +270,6 @@ We heavily encourage you to use the in-app **Reports & Suggestions** button to s
 
 Built on the shoulders of the BCDI and python community:
 [PyNX](https://pynx.esrf.fr/), [BCDI-Utilities](https://github.com/carnisj/bcdi),
-[cdiutils](https://github.com/clatlan/cdiutils), [xrayutilities](https://xrayutilities.sourceforge.io/),
+[cdiutils](https://github.com/clatlan/cdiutils), [Atomsk](https://atomsk.univ-lille.fr/) , [xrayutilities](https://xrayutilities.sourceforge.io/),
 [scikit-image](https://scikit-image.org/), [PyQt6](https://www.riverbankcomputing.com/software/pyqt/),
 and the AutoPhaseNN paper by Yao et al. (2022).
