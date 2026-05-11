@@ -34,6 +34,14 @@ and 3D visualization, in a single GUI.
   </tr>
   <tr>
     <td align="center"><sub>Results — simulated Bragg peak</sub></td>
+    <td align="center"><sub>3D Viewer — diffraction simulation</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/strain.png" width="280"/></td>
+    <td><img src="docs/screenshots/reconstruction.png" width="280"/></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>2D reconstruction</sub></td>
     <td align="center"><sub>3D Viewer — reconstruction</sub></td>
   </tr>
 </table>
