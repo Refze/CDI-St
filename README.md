@@ -23,24 +23,20 @@ and 3D visualization, in a single GUI.
   <tr>
     <td><img src="docs/screenshots/launcher.png" width="280"/></td>
     <td><img src="docs/screenshots/material_tab.png" width="280"/></td>
+	<td><img src="docs/screenshots/results.png" width="280"/></td>
   </tr>
   <tr>
     <td align="center"><sub>Launcher</sub></td>
     <td align="center"><sub>Material — crystal builder</sub></td>
+	<td align="center"><sub>Results — simulated Bragg peak</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/results.png" width="280"/></td>
-    <td><img src="docs/screenshots/3d_viewer.png" width="280"/></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Results — simulated Bragg peak</sub></td>
-    <td align="center"><sub>3D Viewer — diffraction simulation</sub></td>
-  </tr>
-  <tr>
+	<td><img src="docs/screenshots/3d_viewer.png" width="280"/></td>
     <td><img src="docs/screenshots/strain.png" width="280"/></td>
     <td><img src="docs/screenshots/reconstruction.png" width="280"/></td>
   </tr>
   <tr>
+	<td align="center"><sub>3D Viewer — diffraction simulation</sub></td>
     <td align="center"><sub>2D reconstruction</sub></td>
     <td align="center"><sub>3D Viewer — reconstruction</sub></td>
   </tr>
