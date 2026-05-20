@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
     QProgressBar, QPlainTextEdit, QFrame, QCheckBox, QScrollArea,
     QFileDialog, QSplitter, QSlider, QMessageBox, QTabWidget, QApplication,
-    QDialog
+    QDialog, QTableWidget, QTableWidgetItem
 )
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -1990,11 +1990,102 @@ class T5(QWidget):
         spec_widget.setLayout(spec_row)
         form.addRow("SPEC file:", spec_widget)
 
-        # Scan number
+        # Scan number + Browse scans helper
+        scan_row = QHBoxLayout()
         scan_spin = QSpinBox()
         scan_spin.setRange(1, 99999)
         scan_spin.setValue(1)
-        form.addRow("Scan number:", scan_spin)
+        scan_row.addWidget(scan_spin, 1)
+        scan_browse = QPushButton("Browse scans…")
+        scan_browse.setMaximumWidth(115)
+        scan_browse.setToolTip(
+            "List all scans in the SPEC file with their CCD frame ranges.\n"
+            "Pick the scan whose frame range matches your EDF files."
+        )
+        scan_row.addWidget(scan_browse)
+        scan_widget = QWidget()
+        scan_widget.setLayout(scan_row)
+        form.addRow("Scan number:", scan_widget)
+
+        scan_info = QLabel("")
+        scan_info.setStyleSheet("color:#8b949e;font-size:9pt;background:transparent")
+        scan_info.setWordWrap(True)
+        form.addRow("", scan_info)
+
+        def _list_scans():
+            sp = spec_le.text().strip()
+            if not sp or not os.path.exists(sp):
+                QMessageBox.warning(
+                    self, "Pick a SPEC file first",
+                    "Please select the SPEC file before browsing scans."
+                )
+                return
+            try:
+                from cdi_st.nn_experimental_loader import list_spec_scans
+                scans = list_spec_scans(sp)
+            except Exception as e:
+                QMessageBox.warning(self, "Cannot read SPEC file", str(e))
+                return
+            if not scans:
+                QMessageBox.information(
+                    self, "No scans found",
+                    "The SPEC file appears to contain no scans."
+                )
+                return
+            chooser = QDialog(dlg)
+            chooser.setWindowTitle("SPEC scans")
+            chooser.resize(760, 440)
+            cl = QVBoxLayout(chooser)
+            hint = QLabel(
+                "Pick the scan whose CCD frame range covers the EDF files "
+                "you downloaded. Double-click a row or click 'Use selected scan'."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color:#8b949e;font-size:9pt")
+            cl.addWidget(hint)
+            tbl = QTableWidget(len(scans), 4)
+            tbl.setHorizontalHeaderLabels(["Scan #", "Frames", "Points", "Command"])
+            tbl.horizontalHeader().setStretchLastSection(True)
+            tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            tbl.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            tbl.verticalHeader().setVisible(False)
+            for r, s in enumerate(scans):
+                tbl.setItem(r, 0, QTableWidgetItem(str(s["scan_number"])))
+                fr = (f"{s['frame_min']}–{s['frame_max']}"
+                      if s["frame_min"] is not None else "—")
+                tbl.setItem(r, 1, QTableWidgetItem(fr))
+                tbl.setItem(r, 2, QTableWidgetItem(str(s["n_points"])))
+                tbl.setItem(r, 3, QTableWidgetItem(s["command"]))
+            tbl.resizeColumnsToContents()
+            cl.addWidget(tbl, 1)
+            br = QHBoxLayout()
+            br.addStretch()
+            cancel = QPushButton("Cancel")
+            cancel.clicked.connect(chooser.reject)
+            br.addWidget(cancel)
+            use = QPushButton("Use selected scan")
+            use.setStyleSheet("background:#1f6feb;padding:6px 14px;font-weight:600")
+            def _accept():
+                rows = tbl.selectionModel().selectedRows()
+                if not rows:
+                    return
+                idx = rows[0].row()
+                sel = scans[idx]
+                scan_spin.setValue(int(sel["scan_number"]))
+                if sel["frame_min"] is not None:
+                    scan_info.setText(
+                        f"Scan {sel['scan_number']}: frames "
+                        f"{sel['frame_min']}–{sel['frame_max']} "
+                        f"({sel['n_points']} pts).  "
+                        f"{sel['command'][:60]}"
+                    )
+                chooser.accept()
+            use.clicked.connect(_accept)
+            tbl.doubleClicked.connect(lambda *_: _accept())
+            br.addWidget(use)
+            cl.addLayout(br)
+            chooser.exec()
+        scan_browse.clicked.connect(_list_scans)
 
         # EDF directory
         edf_row = QHBoxLayout()
@@ -2036,7 +2127,12 @@ class T5(QWidget):
         # Output .npz path
         out_row = QHBoxLayout()
         out_le = QLineEdit()
-        out_le.setPlaceholderText("output.npz")
+        out_le.setPlaceholderText("e.g. scan46_recon_input.npz")
+        out_le.setToolTip(
+            "Filename for the converted output. The whole 3D diffraction\n"
+            "volume + motor angles + frame numbers are stored in ONE .npz file.\n"
+            "Pick any name and location; the file will be created (or overwritten)."
+        )
         out_row.addWidget(out_le, 1)
         out_browse = QPushButton("…")
         out_browse.setMaximumWidth(30)
@@ -2048,7 +2144,7 @@ class T5(QWidget):
         out_row.addWidget(out_browse)
         out_widget = QWidget()
         out_widget.setLayout(out_row)
-        form.addRow("Output .npz:", out_widget)
+        form.addRow("Output file (.npz):", out_widget)
 
         layout.addLayout(form)
 

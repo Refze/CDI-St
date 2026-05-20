@@ -274,11 +274,12 @@ def find_bragg_peak_box(volume: np.ndarray,
 
     peak_max = float(smoothed.max())
     if peak_max <= 0:
-        # Empty volume — fallback to center
+        # Empty volume — fall back to center coordinates (NOT slices).
+        # The caller expects (cz, cy, cx) as integers, and crop_around_peak
+        # later subtracts half from these. Returning slices here caused a
+        # "unsupported operand type 'slice' and 'int'" error downstream.
         cz, cy, cx = [s // 2 for s in volume.shape]
-        return (slice(max(0, cz-32), cz+32),
-                slice(max(0, cy-32), cy+32),
-                slice(max(0, cx-32), cx+32))
+        return (cz, cy, cx)
 
     # Find ALL voxels above threshold
     threshold = (intensity_threshold_pct / 100.0) * peak_max
@@ -528,6 +529,116 @@ def load_h5_diffraction(
 # Spec/EDF reader (ID01 native format, before BLISS h5)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def list_spec_scans(spec_path: str) -> list:
+    """
+    Return a list of all scans in a SPEC file with summary info, so the GUI
+    can show the user which scan number corresponds to which frame range.
+
+    Returns a list of dicts with keys:
+        scan_number  — the #S N integer (1, 2, 3, ...)
+        command      — the scan command, e.g. "ascan eta 33.5 34.5 100 1"
+        n_points     — number of measurement points
+        frame_min    — first CCD frame number (from mpx4inr column)
+        frame_max    — last CCD frame number
+    """
+    out = []
+    try:
+        from silx.io.specfile import SpecFile
+        sf = SpecFile(spec_path)
+        try:
+            keys = list(sf.keys())
+        except Exception:
+            keys = [f"{i+1}.1" for i in range(len(sf))]
+        for key in keys:
+            try:
+                scan = sf[key]
+                try:
+                    scan_num = int(str(key).split(".")[0])
+                except ValueError:
+                    continue
+                cmd = ""
+                try:
+                    header = scan.header
+                    if header and len(header) > 0:
+                        first = header[0]
+                        if first.startswith("#S"):
+                            parts = first.split(None, 2)
+                            cmd = parts[2] if len(parts) > 2 else ""
+                except Exception:
+                    pass
+                frame_min = frame_max = None
+                n_points = 0
+                try:
+                    labels = list(scan.labels)
+                    if "mpx4inr" in labels:
+                        try:
+                            frames = scan.data_column_by_name("mpx4inr")
+                        except Exception:
+                            i = labels.index("mpx4inr")
+                            d = scan.data
+                            frames = d[:, i] if d.shape[1] == len(labels) else d[i]
+                        frames = np.asarray(frames)
+                        if frames.size > 0:
+                            frame_min = int(frames.min())
+                            frame_max = int(frames.max())
+                            n_points = int(frames.size)
+                except Exception:
+                    pass
+                out.append({
+                    "scan_number": scan_num,
+                    "command": cmd,
+                    "n_points": n_points,
+                    "frame_min": frame_min,
+                    "frame_max": frame_max,
+                })
+            except Exception:
+                continue
+    except ImportError:
+        # Without silx, do a simple text parse of the SPEC file
+        with open(spec_path, "r", encoding="latin-1") as f:
+            current_scan = None
+            in_data = False
+            mpx_col = None
+            for line in f:
+                if line.startswith("#S "):
+                    if current_scan is not None:
+                        out.append(current_scan)
+                    parts = line.split(None, 2)
+                    try:
+                        n = int(parts[1])
+                    except (IndexError, ValueError):
+                        n = -1
+                    current_scan = {
+                        "scan_number": n,
+                        "command": parts[2].strip() if len(parts) > 2 else "",
+                        "n_points": 0,
+                        "frame_min": None,
+                        "frame_max": None,
+                    }
+                    in_data = False
+                    mpx_col = None
+                elif line.startswith("#L ") and current_scan is not None:
+                    labels_for_scan = line[3:].strip().split()
+                    if "mpx4inr" in labels_for_scan:
+                        mpx_col = labels_for_scan.index("mpx4inr")
+                    in_data = True
+                elif in_data and current_scan is not None and not line.startswith("#"):
+                    fields = line.strip().split()
+                    if mpx_col is not None and mpx_col < len(fields):
+                        try:
+                            v = int(float(fields[mpx_col]))
+                            if current_scan["frame_min"] is None or v < current_scan["frame_min"]:
+                                current_scan["frame_min"] = v
+                            if current_scan["frame_max"] is None or v > current_scan["frame_max"]:
+                                current_scan["frame_max"] = v
+                            current_scan["n_points"] += 1
+                        except ValueError:
+                            pass
+            if current_scan is not None:
+                out.append(current_scan)
+    return out
+
+
 def read_spec_scan(spec_path: str, scan_number: int) -> dict:
     """
     Read motor positions for a scan from a SPEC file.
@@ -560,7 +671,27 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
         scan = sf[f"{scan_number}.1"]
         labels = scan.labels
         data = scan.data
-        result = {label: data[i] for i, label in enumerate(labels)}
+        # IMPORTANT: modern silx (>=0.5) returns data with shape
+        # (nlines, ncolumns). To get the column for label i, we need
+        # data[:, i], NOT data[i]. Using data[i] gives one measurement
+        # point's row of values across all columns — completely
+        # misaligned with the label list.
+        # Use scan.data_column_by_name() when available (robust); fall
+        # back to direct indexing with shape detection.
+        result = {}
+        for i, label in enumerate(labels):
+            col = None
+            try:
+                col = scan.data_column_by_name(label)
+            except Exception:
+                if data.ndim == 2:
+                    if data.shape[1] == len(labels):
+                        col = data[:, i]              # (nlines, ncols)
+                    else:
+                        col = data[i]                 # (ncols, nlines) legacy
+                else:
+                    col = data
+            result[label] = np.asarray(col)
         # Header motors
         motor_names = scan.motor_names
         motor_positions = scan.motor_positions
@@ -641,13 +772,37 @@ def read_edf_stack(edf_template: str, frame_numbers: list,
 
     n = len(frame_numbers)
     volume = np.zeros((n,) + detector_shape, dtype=np.float32)
+    n_loaded = 0
+    failed_examples = []
     for idx, frame in enumerate(frame_numbers):
         f = edf_template % int(frame)
         try:
             e = xu.io.EDFFile(f)
             volume[idx] = e.data.astype(np.float32)
+            n_loaded += 1
         except Exception as ex:
-            print(f"  Warning: could not read {f}: {ex}")
+            if len(failed_examples) < 3:
+                failed_examples.append((f, str(ex)))
+
+    if n_loaded == 0:
+        # Every single frame failed to load. Give a clear, actionable error
+        # rather than letting the rest of the pipeline crash on a zero volume.
+        examples = "\n".join(f"  - {p} : {e}" for p, e in failed_examples)
+        raise FileNotFoundError(
+            f"Could not load ANY of the {n} EDF frames "
+            f"(frame numbers {min(frame_numbers)}-{max(frame_numbers)}).\n\n"
+            f"First few failures:\n{examples}\n\n"
+            f"Likely causes:\n"
+            f"  1. The chosen SPEC scan references frame numbers that don't\n"
+            f"     match the EDF files in your folder. Use 'Browse scans…'\n"
+            f"     to find the scan whose mpx4inr range matches your files.\n"
+            f"  2. The filename template (e.g. '{edf_template}') is wrong\n"
+            f"     for your data (check: %05d zero-pad, .edf vs .edf.gz).\n"
+            f"  3. The EDF directory path is incorrect."
+        )
+    if n_loaded < n:
+        print(f"  Warning: loaded {n_loaded}/{n} frames; "
+              f"{n - n_loaded} missing (left as zero)")
     return volume
 
 
@@ -710,7 +865,10 @@ def load_spec_edf_scan(
     edf_template = os.path.join(edf_dir, edf_template_name)
     frame_numbers = np.asarray(spec_data['mpx4inr']).astype(int)
     if verbose:
-        print(f"  Loading {len(frame_numbers)} EDF frames from {edf_dir}")
+        print(f"  Scan {scan_number} references frames "
+              f"{int(frame_numbers.min())}-{int(frame_numbers.max())} "
+              f"({len(frame_numbers)} total)")
+        print(f"  Loading from {edf_dir}")
     volume = read_edf_stack(edf_template, frame_numbers, detector_shape)
     if verbose:
         print(f"  Raw stack: shape={volume.shape}  max={volume.max():.2e}")
