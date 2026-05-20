@@ -6,6 +6,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-20
+
+### Fixed
+- SPEC+EDF converter crash with "slice - int" error when EDF files could not be loaded (`find_bragg_peak_box` now returns coordinates instead of slices in the zero-volume fallback)
+- silx data column indexing was wrong — modern silx returns `data.shape == (nlines, ncolumns)`, so `data[i]` was the i-th measurement row, not the i-th column. Now uses `scan.data_column_by_name(label)` with shape-aware fallback
+- Clear error message when no EDF frames can be loaded (lists likely causes instead of crashing later)
+- SPEC+EDF converter now prints the frame range of the chosen scan before loading
+
+### Added
+- New "Browse scans…" button in SPEC+EDF dialog: lists every scan in the SPEC file with its CCD frame range, so users can pick the scan matching their downloaded EDF files
+- New `list_spec_scans()` helper in `nn_experimental_loader.py`
+
+### Changed
+- Renamed output field "Output .npz:" to "Output file (.npz):" with clarifying placeholder and tooltip
+
+
 ## [0.1.0] — Alpha — 2026-05-08
 
 ### Added
