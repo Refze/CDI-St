@@ -6,6 +6,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-20
+
+### Fixed
+- Fixed exporting VTI to Paraview
+
+### Added
+- SPEC+EDF converter: Added option to convert multiple scans
+
+
 ## [0.1.2] — 2026-05-20
 
 ### Fixed

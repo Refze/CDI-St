@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cdi-stools"
-version = "0.1.2"
+version = "0.1.3"
 description = "Coherent Diffraction Imaging Simulation Tools — BCDI simulation and NN-based phase retrieval"
 readme = "README.md"
 requires-python = ">=3.9"

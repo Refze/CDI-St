@@ -2000,7 +2000,10 @@ class T5(QWidget):
         scan_browse.setMaximumWidth(115)
         scan_browse.setToolTip(
             "List all scans in the SPEC file with their CCD frame ranges.\n"
-            "Pick the scan whose frame range matches your EDF files."
+            "You can select ONE or MULTIPLE scans:\n"
+            "  • Single scan → output is one .npz file\n"
+            "  • Multiple scans (Ctrl/Shift click) → output becomes a directory,\n"
+            "    each scan saved as scan_<N>_recon_input.npz"
         )
         scan_row.addWidget(scan_browse)
         scan_widget = QWidget()
@@ -2011,6 +2014,11 @@ class T5(QWidget):
         scan_info.setStyleSheet("color:#8b949e;font-size:9pt;background:transparent")
         scan_info.setWordWrap(True)
         form.addRow("", scan_info)
+
+        # State: list of currently-selected scans for batch conversion
+        # When length is 1, single-scan mode (uses scan_spin + out_le).
+        # When length > 1, batch mode (uses scan_list + out_le as directory).
+        scan_state = {"selected": []}
 
         def _list_scans():
             sp = spec_le.text().strip()
@@ -2033,12 +2041,13 @@ class T5(QWidget):
                 )
                 return
             chooser = QDialog(dlg)
-            chooser.setWindowTitle("SPEC scans")
-            chooser.resize(760, 440)
+            chooser.setWindowTitle("SPEC scans (select one or many)")
+            chooser.resize(820, 480)
             cl = QVBoxLayout(chooser)
             hint = QLabel(
-                "Pick the scan whose CCD frame range covers the EDF files "
-                "you downloaded. Double-click a row or click 'Use selected scan'."
+                "Select ONE scan to convert just that scan, OR Ctrl+click / "
+                "Shift+click to select MULTIPLE scans for batch conversion. "
+                "Pick scans whose CCD frame range covers the EDF files you have."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color:#8b949e;font-size:9pt")
@@ -2046,8 +2055,9 @@ class T5(QWidget):
             tbl = QTableWidget(len(scans), 4)
             tbl.setHorizontalHeaderLabels(["Scan #", "Frames", "Points", "Command"])
             tbl.horizontalHeader().setStretchLastSection(True)
+            # MULTI-select enabled (Ctrl/Shift to extend)
             tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            tbl.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            tbl.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
             tbl.verticalHeader().setVisible(False)
             for r, s in enumerate(scans):
                 tbl.setItem(r, 0, QTableWidgetItem(str(s["scan_number"])))
@@ -2058,26 +2068,46 @@ class T5(QWidget):
                 tbl.setItem(r, 3, QTableWidgetItem(s["command"]))
             tbl.resizeColumnsToContents()
             cl.addWidget(tbl, 1)
+
+            sel_label = QLabel("0 scan(s) selected")
+            sel_label.setStyleSheet("color:#8b949e;font-size:9pt")
+            cl.addWidget(sel_label)
+            def _on_sel_changed():
+                n = len(tbl.selectionModel().selectedRows())
+                sel_label.setText(f"{n} scan(s) selected")
+            tbl.selectionModel().selectionChanged.connect(lambda *_: _on_sel_changed())
+
             br = QHBoxLayout()
             br.addStretch()
             cancel = QPushButton("Cancel")
             cancel.clicked.connect(chooser.reject)
             br.addWidget(cancel)
-            use = QPushButton("Use selected scan")
+            use = QPushButton("Use selected scan(s)")
             use.setStyleSheet("background:#1f6feb;padding:6px 14px;font-weight:600")
             def _accept():
                 rows = tbl.selectionModel().selectedRows()
                 if not rows:
                     return
-                idx = rows[0].row()
-                sel = scans[idx]
-                scan_spin.setValue(int(sel["scan_number"]))
-                if sel["frame_min"] is not None:
+                indices = sorted(r.row() for r in rows)
+                selected_scans = [scans[i] for i in indices]
+                scan_state["selected"] = selected_scans
+                # Update UI
+                scan_spin.setValue(int(selected_scans[0]["scan_number"]))
+                if len(selected_scans) == 1:
+                    s = selected_scans[0]
+                    fr_txt = (f"frames {s['frame_min']}–{s['frame_max']}"
+                              if s["frame_min"] is not None else "frames unknown")
                     scan_info.setText(
-                        f"Scan {sel['scan_number']}: frames "
-                        f"{sel['frame_min']}–{sel['frame_max']} "
-                        f"({sel['n_points']} pts).  "
-                        f"{sel['command'][:60]}"
+                        f"<b>1 scan:</b> #{s['scan_number']} ({fr_txt}, "
+                        f"{s['n_points']} pts).  {s['command'][:60]}"
+                    )
+                else:
+                    nums = ", ".join(str(s["scan_number"]) for s in selected_scans)
+                    scan_info.setText(
+                        f"<b>{len(selected_scans)} scans</b> selected: {nums}.<br>"
+                        f"<span style='color:#bf8700'>"
+                        f"Output is now a DIRECTORY. Each scan saves as "
+                        f"<tt>scan_&lt;N&gt;_recon_input.npz</tt> inside it.</span>"
                     )
                 chooser.accept()
             use.clicked.connect(_accept)
@@ -2137,9 +2167,20 @@ class T5(QWidget):
         out_browse = QPushButton("…")
         out_browse.setMaximumWidth(30)
         def _pick_out():
-            f, _ = QFileDialog.getSaveFileName(self, "Save converted .npz", "scan.npz", "NumPy (*.npz)")
-            if f:
-                out_le.setText(f)
+            # If multiple scans are selected, pick a directory; otherwise pick a file
+            sel = scan_state.get("selected", [])
+            if len(sel) > 1:
+                d = QFileDialog.getExistingDirectory(
+                    self, "Pick output directory for batch conversion"
+                )
+                if d:
+                    out_le.setText(d)
+            else:
+                f, _ = QFileDialog.getSaveFileName(
+                    self, "Save converted .npz", "scan.npz", "NumPy (*.npz)"
+                )
+                if f:
+                    out_le.setText(f)
         out_browse.clicked.connect(_pick_out)
         out_row.addWidget(out_browse)
         out_widget = QWidget()
@@ -2182,40 +2223,101 @@ class T5(QWidget):
             det_str = det_combo.currentText().split()[0]
             det_shape = (516, 516) if det_str == 'maxipix' else (1062, 1028)
 
-            convert_btn.setEnabled(False)
-            status.setText("Converting… (this may take 10-60 seconds)")
-            QApplication.processEvents()
+            # Determine batch mode from the scan_state set by "Browse scans"
+            selected = scan_state.get("selected", [])
+            if len(selected) <= 1:
+                # Single-scan mode (either from spinner or single-row selection)
+                scan_numbers = [scan_spin.value()]
+                # out_path is interpreted as a file
+                if os.path.isdir(out_path):
+                    # User pointed at a folder — auto-name inside it
+                    out_targets = [os.path.join(
+                        out_path, f"scan_{scan_numbers[0]}_recon_input.npz"
+                    )]
+                else:
+                    out_targets = [out_path]
+            else:
+                # Batch mode — out_path is a directory
+                scan_numbers = [int(s["scan_number"]) for s in selected]
+                if not os.path.isdir(out_path):
+                    # Auto-create if it doesn't exist
+                    try:
+                        os.makedirs(out_path, exist_ok=True)
+                    except Exception as e:
+                        status.setText(
+                            f"<span style='color:#da3633'>Output directory "
+                            f"could not be created: {e}</span>"
+                        )
+                        return
+                out_targets = [
+                    os.path.join(out_path, f"scan_{n}_recon_input.npz")
+                    for n in scan_numbers
+                ]
 
-            try:
-                from cdi_st.nn_experimental_loader import spec_edf_to_npz
-                result = spec_edf_to_npz(
-                    spec_path=spec_path,
-                    scan_number=scan_spin.value(),
-                    edf_dir=edf_dir,
-                    npz_path=out_path,
-                    target_size=size_spin.value(),
-                    edf_template_name=tpl_le.text().strip(),
-                )
+            convert_btn.setEnabled(False)
+            from cdi_st.nn_experimental_loader import spec_edf_to_npz
+            n_total = len(scan_numbers)
+            n_ok = 0
+            failures = []
+            last_result_path = None
+
+            for i, (sn, tgt) in enumerate(zip(scan_numbers, out_targets), start=1):
                 status.setText(
-                    f"<span style='color:#3fb950'>\u2713 Saved {out_path}</span><br>"
-                    f"<span style='color:#8b949e;font-size:9pt'>"
-                    f"Volume: {size_spin.value()}\u00b3, peak max="
-                    f"{result['diffraction'].max():.1e}, "
-                    f"rocking={result.get('rocking_type', 'unknown')}"
-                    "</span>"
+                    f"Converting scan {sn}… ({i}/{n_total})"
                 )
-                self.input_path.setText(out_path)
-                # Re-enable cancel button now that done
-                cancel_btn.setText("Close")
-            except Exception as e:
-                import traceback
+                QApplication.processEvents()
+                try:
+                    result = spec_edf_to_npz(
+                        spec_path=spec_path,
+                        scan_number=sn,
+                        edf_dir=edf_dir,
+                        npz_path=tgt,
+                        target_size=size_spin.value(),
+                        edf_template_name=tpl_le.text().strip(),
+                    )
+                    n_ok += 1
+                    last_result_path = tgt
+                except Exception as e:
+                    import traceback
+                    print(f"[scan {sn}] failed: {e}")
+                    print(traceback.format_exc())
+                    failures.append((sn, str(e)))
+
+            # Final status summary
+            if n_ok == n_total:
+                # All succeeded
+                if n_total == 1:
+                    status.setText(
+                        f"<span style='color:#3fb950'>\u2713 Saved {out_targets[0]}</span>"
+                    )
+                    self.input_path.setText(out_targets[0])
+                else:
+                    status.setText(
+                        f"<span style='color:#3fb950'>\u2713 Converted {n_ok}/"
+                        f"{n_total} scans into {out_path}</span><br>"
+                        f"<span style='color:#8b949e;font-size:9pt'>"
+                        f"Pick one .npz with the input file selector to load it."
+                        f"</span>"
+                    )
+                    # Pre-fill input_path with the first one for convenience
+                    self.input_path.setText(out_targets[0])
+            elif n_ok > 0:
+                fail_txt = ", ".join(f"#{sn}" for sn, _ in failures[:3])
                 status.setText(
-                    f"<span style='color:#da3633'>\u2717 Conversion failed:</span><br>"
-                    f"<span style='font-size:9pt'>{e}</span>"
+                    f"<span style='color:#bf8700'>⚠ {n_ok}/{n_total} scans "
+                    f"succeeded. Failed: {fail_txt}{'…' if len(failures) > 3 else ''}</span>"
                 )
-                print(traceback.format_exc())
-            finally:
-                convert_btn.setEnabled(True)
+                if last_result_path:
+                    self.input_path.setText(last_result_path)
+            else:
+                first_err = failures[0][1] if failures else "unknown error"
+                status.setText(
+                    f"<span style='color:#da3633'>\u2717 All conversions failed.</span><br>"
+                    f"<span style='font-size:9pt'>First error: {first_err[:200]}</span>"
+                )
+
+            cancel_btn.setText("Close")
+            convert_btn.setEnabled(True)
 
         convert_btn.clicked.connect(_do_convert)
         dlg.exec()
@@ -2360,7 +2462,24 @@ class T5(QWidget):
                 f'Electron density | Phase | Strain  (slices at COM = ({cx}, {cy}, {cz}))',
                 fontsize=11, color='#4f98a3'
             )
-            axes = fig.subplots(3, 3)
+            # GridSpec with FIXED column widths: 3 equal image columns + 1 thin
+            # colorbar column. This is the key to the layout being stable: the
+            # colorbar lives in its own column, so it never pushes the image
+            # axes around or causes the layout to reflow when matplotlib
+            # adjusts the figure during a zoom or pan operation.
+            gs = fig.add_gridspec(
+                3, 4,
+                width_ratios=[1.0, 1.0, 1.0, 0.05],
+                wspace=0.30,
+                hspace=0.40,
+                left=0.06, right=0.93, top=0.92, bottom=0.06,
+            )
+            axes = np.empty((3, 3), dtype=object)
+            cax = [None, None, None]   # colorbar axes per row
+            for r in range(3):
+                for c in range(3):
+                    axes[r, c] = fig.add_subplot(gs[r, c])
+                cax[r] = fig.add_subplot(gs[r, 3])
 
             slicers = [
                 ('XY', lambda a: a[:, :, cz]),
@@ -2379,7 +2498,8 @@ class T5(QWidget):
                 ax.set_title(f'|ρ| {name}', fontsize=9, color='#e6edf3')
                 ax.tick_params(labelsize=6)
                 if col == 2:
-                    fig.colorbar(im, ax=ax, shrink=0.7)
+                    fig.colorbar(im, cax=cax[0])
+                    cax[0].tick_params(labelsize=7, colors='#8b949e')
 
             # Row 1: phase (masked to support, full [-π, π] range)
             for col, (name, getter) in enumerate(slicers):
@@ -2392,9 +2512,10 @@ class T5(QWidget):
                 ax.set_title(f'φ {name}', fontsize=9, color='#e6edf3')
                 ax.tick_params(labelsize=6)
                 if col == 2:
-                    cb = fig.colorbar(im, ax=ax, shrink=0.7)
+                    cb = fig.colorbar(im, cax=cax[1])
                     cb.set_ticks([-np.pi, 0, np.pi])
                     cb.set_ticklabels(['-π', '0', 'π'])
+                    cax[1].tick_params(labelsize=7, colors='#8b949e')
 
             # Row 2: strain magnitude (gradient of phase inside support)
             for col, (name, getter) in enumerate(slicers):
@@ -2410,7 +2531,8 @@ class T5(QWidget):
                 ax.set_title(f'|∇φ| {name}', fontsize=9, color='#e6edf3')
                 ax.tick_params(labelsize=6)
                 if col == 2:
-                    fig.colorbar(im, ax=ax, shrink=0.7)
+                    fig.colorbar(im, cax=cax[2])
+                    cax[2].tick_params(labelsize=7, colors='#8b949e')
 
         self.canvases[1].draw()
 
@@ -3446,6 +3568,10 @@ class T6(QWidget):
                 cb = self.fig3d.colorbar(sm, ax=ax, shrink=0.6, pad=0.08)
                 cb.set_label(cb_label, color='#e6edf3', fontsize=9)
                 cb.ax.tick_params(colors='#8b949e', labelsize=8)
+                # Phase mode: show π and -π instead of numeric 3.14
+                if mode_idx == 1:
+                    cb.set_ticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+                    cb.set_ticklabels(['-π', '-π/2', '0', 'π/2', 'π'])
 
             else:
                 # ────────────────────────────────────────────────────────────
@@ -3534,6 +3660,10 @@ class T6(QWidget):
                 cb = self.fig3d.colorbar(sm, ax=ax, shrink=0.6, pad=0.08)
                 cb.set_label(cb_label, color='#e6edf3', fontsize=9)
                 cb.ax.tick_params(colors='#8b949e', labelsize=8)
+                # Phase mode: show π and -π instead of numeric 3.14
+                if mode_idx == 1:
+                    cb.set_ticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+                    cb.set_ticklabels(['-π', '-π/2', '0', 'π/2', 'π'])
 
             # ── Common axis setup ────────────────────────────────────────
             half_x = (N / 2) * sx
@@ -3581,9 +3711,25 @@ class T6(QWidget):
             self._write_vti(path)
             QMessageBox.information(
                 self, "Export complete",
-                f"Saved:\n{path}\n\n"
-                f"Open in ParaView for high-quality 3D rendering,\n"
-                f"isosurface extraction, and dislocation tracing.\n\n"
+                f"<b>Saved:</b><br><tt>{path}</tt><br><br>"
+                f"<b>To view the FULL 3D object in ParaView:</b><br>"
+                f"1. Open the .vti file in ParaView<br>"
+                f"2. In the <b>Pipeline Browser</b> click the file → "
+                f"<b>Apply</b> (green button)<br>"
+                f"3. Change <b>Representation</b> from 'Outline' to "
+                f"<b>'Volume'</b> (top-left dropdown)<br>"
+                f"4. Change <b>Coloring</b> from 'support' to "
+                f"<b>'amplitude'</b> (the second dropdown)<br>"
+                f"5. Adjust opacity via <b>Edit Color Map</b> if needed<br><br>"
+                f"<i>Note: if you see only a flat slice, you're in 'Slice' "
+                f"mode. Switch to 'Volume' representation to see the full 3D "
+                f"reconstruction.</i><br><br>"
+                f"<b>Available scalar fields in the file:</b><br>"
+                f"  • <tt>amplitude</tt>      — |ρ(r)|, GUI threshold applied<br>"
+                f"  • <tt>amplitude_full</tt> — |ρ(r)|, no threshold<br>"
+                f"  • <tt>phase</tt>           — φ(r), NaN outside support<br>"
+                f"  • <tt>strain</tt>          — |∇φ(r)|, NaN outside support<br>"
+                f"  • <tt>support</tt>         — binary mask (0 or 1)<br><br>"
                 f"Free download: https://www.paraview.org",
             )
         except Exception as e:
@@ -3717,36 +3863,50 @@ class T6(QWidget):
         writer.Write()
 
     def _write_vti_manual(self, path, arrays_to_write, spacing, origin):
-        """Write VTI without the vtk library — manual XML + base64."""
-        import base64, zlib, struct
+        """
+        Write VTI without the vtk library. Uses base64-encoded uncompressed
+        binary with a simple UInt32 length header — the most compatible format
+        ParaView supports. Avoids zlib block-based encoding (which some
+        ParaView builds parse incorrectly with a single large block, causing
+        the data to appear as a flat slice).
+        """
+        import base64, struct
         first_arr = arrays_to_write[0][1]
-        N1, N2, N3 = first_arr.shape
+        # Numpy shape is (Nx, Ny, Nz) for the reconstruction volume.
+        # VTK ImageData uses (Nx, Ny, Nz) as its Dimensions, with data laid
+        # out in Fortran order (X fastest, then Y, then Z).
+        Nx, Ny, Nz = first_arr.shape
 
         def _encode(arr):
-            flat = arr.astype(np.float32).ravel(order='F').tobytes()
-            compressed = zlib.compress(flat, level=6)
-            header = struct.pack('<IIII', 1, len(flat), len(flat), len(compressed))
-            return base64.b64encode(header + compressed).decode('ascii')
+            # 1. Cast to float32 in Fortran order (X varies fastest)
+            flat = np.ascontiguousarray(
+                arr.astype(np.float32).transpose(0, 1, 2).ravel(order='F')
+            ).tobytes()
+            # 2. Prepend a UInt32 byte-count header (uncompressed VTK format)
+            header = struct.pack('<I', len(flat))
+            # 3. Base64-encode for embedding in XML
+            return base64.b64encode(header + flat).decode('ascii')
 
         arrays_xml = ""
         for name, arr in arrays_to_write:
             data_b64 = _encode(arr)
             arrays_xml += (
-                f'<DataArray type="Float32" Name="{name}" '
-                f'format="binary" NumberOfComponents="1">'
-                f'{data_b64}</DataArray>\n'
+                f'      <DataArray type="Float32" Name="{name}" '
+                f'format="binary" NumberOfComponents="1">\n'
+                f'        {data_b64}\n'
+                f'      </DataArray>\n'
             )
 
         first_name = arrays_to_write[0][0]
+        # No `compressor` attribute → uncompressed binary, simpler parsing
         xml = f'''<?xml version="1.0"?>
-<VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
-<ImageData WholeExtent="0 {N1-1} 0 {N2-1} 0 {N3-1}" Origin="{origin[0]} {origin[1]} {origin[2]}" Spacing="{spacing[0]} {spacing[1]} {spacing[2]}">
-<Piece Extent="0 {N1-1} 0 {N2-1} 0 {N3-1}">
-<PointData Scalars="{first_name}">
-{arrays_xml}
-</PointData>
-</Piece>
-</ImageData>
+<VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt32">
+  <ImageData WholeExtent="0 {Nx-1} 0 {Ny-1} 0 {Nz-1}" Origin="{origin[0]} {origin[1]} {origin[2]}" Spacing="{spacing[0]} {spacing[1]} {spacing[2]}">
+    <Piece Extent="0 {Nx-1} 0 {Ny-1} 0 {Nz-1}">
+      <PointData Scalars="{first_name}">
+{arrays_xml}      </PointData>
+    </Piece>
+  </ImageData>
 </VTKFile>
 '''
         with open(path, 'w', encoding='utf-8') as f:
