@@ -110,12 +110,16 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-# Pragmatic linting — most existing code already breaks heavy strict mode
 select = ["E", "F", "W", "I", "UP"]
 ignore = [
-    "E501",   # line too long — many scientific lines exceed 100
-    "E402",   # module-level import not at top — common with conditional Qt imports
+    "E501",   # line too long
+    "E402",   # module-level import not at top
     "E731",   # don't assign a lambda
+    "E702",   # multiple statements on one line (semicolon) — used heavily in this codebase
+    "F841",   # local variable assigned but never used — common with placeholder im0/im1
+    "E741",   # ambiguous variable name (l, I, O)
+    "W291",   # trailing whitespace
+    "W293",   # whitespace on blank line
 ]
 
 [tool.pytest.ini_options]
