@@ -6,6 +6,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-20
+
+### Fixed
+- SPEC+EDF converter: scan listing, frame range display, clear errors when EDFs fail to load
+- silx data column indexing
+- `find_bragg_peak_box` slice/int crash on empty volumes
+
+### Added
+- "Browse scans…" button in SPEC+EDF dialog
+
 ## [0.1.1] — 2026-05-20
 
 ### Fixed
