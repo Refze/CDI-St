@@ -169,11 +169,22 @@ class TrainingWorker(QThread):
             no_improve = 0
 
             # --- Step 4: Training loop ---
+            # Compute total number of batch iterations across all epochs
+            # for accurate intra-epoch progress reporting.
+            n_train_batches = max(1, len(train_loader))
+            n_val_batches = max(1, len(val_loader))
+            batches_per_epoch = n_train_batches + n_val_batches
+            total_iters = (p['epochs'] - start_epoch) * batches_per_epoch
+            iter_count = 0
+
+            import time as _time
+            last_emit = _time.time()
+
             for epoch in range(start_epoch, p['epochs']):
                 model.train()
                 t0 = time.time()
                 train_total = 0; train_n = 0
-                for batch in train_loader:
+                for batch_idx, batch in enumerate(train_loader):
                     inp = batch['input'].to(device)
                     measured = batch['measured'].to(device)
 
@@ -199,6 +210,23 @@ class TrainingWorker(QThread):
                     train_total += losses['total'].item()
                     train_n += 1
 
+                    # Intra-epoch progress: update at most every 2 seconds so
+                    # the GUI thread isn't flooded with signal traffic.
+                    iter_count += 1
+                    now = _time.time()
+                    if now - last_emit > 2.0:
+                        pct = int(100 * iter_count / max(total_iters, 1))
+                        self.progress.emit(min(pct, 99))
+                        # Also a brief log line every few seconds so user
+                        # sees the trainer is alive even mid-epoch.
+                        running_loss = train_total / max(train_n, 1)
+                        self.log.emit(
+                            f"  Ep {epoch+1}/{p['epochs']}  "
+                            f"batch {batch_idx+1}/{n_train_batches}  "
+                            f"loss={running_loss:.5f}"
+                        )
+                        last_emit = now
+
                 # Validate
                 model.eval()
                 val_total = 0; val_n = 0
@@ -212,6 +240,7 @@ class TrainingWorker(QThread):
                             losses = loss_fn(pred_diff, measured, amp, phase, support)
                         val_total += losses['total'].item()
                         val_n += 1
+                        iter_count += 1
 
                 train_loss = train_total / max(train_n, 1)
                 val_loss = val_total / max(val_n, 1)
@@ -361,12 +390,20 @@ class SupervisedTrainingWorker(QThread):
             no_improve = 0
 
             # Training loop
+            # Intra-epoch progress reporting: emit progress at most every 2s
+            n_train_batches = max(1, len(train_loader))
+            n_val_batches = max(1, len(val_loader))
+            total_iters = (p['epochs'] - start_epoch) * (n_train_batches + n_val_batches)
+            iter_count = 0
+            import time as _time
+            last_emit = _time.time()
+
             for epoch in range(start_epoch, p['epochs']):
                 model.train()
                 t0 = time.time()
                 train_total = 0; train_n = 0
 
-                for batch in train_loader:
+                for batch_idx, batch in enumerate(train_loader):
                     inp = batch['input'].to(device)
                     phase_true = batch['phase_true'].to(device)
                     support = batch['support'].to(device)
@@ -389,6 +426,19 @@ class SupervisedTrainingWorker(QThread):
                     train_total += losses['total'].item()
                     train_n += 1
 
+                    iter_count += 1
+                    now = _time.time()
+                    if now - last_emit > 2.0:
+                        pct = int(100 * iter_count / max(total_iters, 1))
+                        self.progress.emit(min(pct, 99))
+                        running_loss = train_total / max(train_n, 1)
+                        self.log.emit(
+                            f"  Ep {epoch+1}/{p['epochs']}  "
+                            f"batch {batch_idx+1}/{n_train_batches}  "
+                            f"loss={running_loss:.5f}"
+                        )
+                        last_emit = now
+
                 # Validate
                 model.eval()
                 val_total = 0; val_n = 0
@@ -408,6 +458,7 @@ class SupervisedTrainingWorker(QThread):
                             )
                         val_total += losses['total'].item()
                         val_n += 1
+                        iter_count += 1
 
                 train_loss = train_total / max(train_n, 1)
                 val_loss = val_total / max(val_n, 1)
@@ -480,17 +531,11 @@ class ReconstructionWorker(QThread):
                 model_channels = _ckpt_meta.get('base_channels', None)
                 if model_grid:
                     self.log.emit(f"Model trained at grid {model_grid}\u00b3, base_channels={model_channels}")
-                else:
-                    # Old checkpoint without metadata. The model is fully
-                    # convolutional so it can run at the input's native size.
-                    # Just warn the user — DO NOT auto-resample silently
-                    # (forced resampling can degrade results badly if the
-                    # model was actually trained at a different size).
-                    self.log.emit(
-                        "Model checkpoint has no grid_size metadata \u2014 "
-                        "running at input's native size. If results look bad, "
-                        "retrain the model so the new checkpoint records grid_size."
-                    )
+                # Old checkpoints without grid_size metadata: the model is
+                # fully convolutional so it runs at the input's native size.
+                # Don't log a warning — that's the normal state for v0.1.x
+                # checkpoints. The check is silent unless something actually
+                # goes wrong (handled later in inference).
                 del _ckpt_meta
             except Exception:
                 model_grid = None

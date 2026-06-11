@@ -73,44 +73,138 @@ class T1(QWidget):
         # Material with CIF import
         mb=QGroupBox("Material");mv=QVBoxLayout(mb);mv.setSpacing(4)
         r1=QHBoxLayout();r1.addWidget(QLabel("Preset:"));self.combo=QComboBox()
+        self.combo.setToolTip(
+            "Pre-configured materials. Each preset contains the lattice "
+            "constants (a, b, c, angles), space group, atomic basis, and "
+            "common BCDI reflections.\n"
+            "Includes: Si, Ge, Pt, Au, Cu, Pd, GaAs, GaN, SiC, ZnO,\n"
+            "BaTiO3, SrTiO3, Fe5GeTe2, V2O3, hexagonal/cubic polytypes,\n"
+            "and any custom .cif files you've loaded."
+        )
         for k in MATERIAL_PRESETS: self.combo.addItem(k)
         self.combo.currentTextChanged.connect(self._pc);r1.addWidget(self.combo,1);mv.addLayout(r1)
-        r2=QHBoxLayout();r2.addWidget(QLabel("Formula:"));self.fe=QLineEdit();self.fe.setPlaceholderText("e.g. Fe5GeTe2");r2.addWidget(self.fe,1)
-        mb2=QPushButton("Match");mb2.setStyleSheet("background:#4f98a3;padding:5px 10px;min-height:20px");mb2.setMaximumWidth(55);mb2.clicked.connect(self._mt);r2.addWidget(mb2)
-        cif_btn=QPushButton("Load .cif");cif_btn.setStyleSheet("background:#1f6feb;padding:5px 10px;min-height:20px");cif_btn.setMaximumWidth(70);cif_btn.clicked.connect(self._load_cif);r2.addWidget(cif_btn)
+        r2=QHBoxLayout();r2.addWidget(QLabel("Formula:"));self.fe=QLineEdit();self.fe.setPlaceholderText("e.g. Fe5GeTe2")
+        self.fe.setToolTip(
+            "Type a chemical formula (e.g. 'Si', 'GaAs', 'Fe5GeTe2'),\n"
+            "then click 'Match' to find the matching preset. Useful when\n"
+            "you know the formula but not the exact preset name."
+        )
+        r2.addWidget(self.fe,1)
+        mb2=QPushButton("Match");mb2.setStyleSheet("background:#4f98a3;padding:5px 10px;min-height:20px");mb2.setMaximumWidth(55)
+        mb2.setToolTip("Find the preset that matches the typed formula.")
+        mb2.clicked.connect(self._mt);r2.addWidget(mb2)
+        cif_btn=QPushButton("Load .cif");cif_btn.setStyleSheet("background:#1f6feb;padding:5px 10px;min-height:20px");cif_btn.setMaximumWidth(70)
+        cif_btn.setToolTip(
+            "Import a Crystallographic Information File (.cif) as a custom\n"
+            "material. The file is parsed for cell parameters, space group,\n"
+            "and atomic basis. The new preset becomes selectable in the dropdown."
+        )
+        cif_btn.clicked.connect(self._load_cif);r2.addWidget(cif_btn)
         mv.addLayout(r2);self.il=QLabel();self.il.setWordWrap(True);self.il.setStyleSheet("color:#8b949e;font-size:9pt");mv.addWidget(self.il);ll.addWidget(mb)
         # Supercell
         sb=QGroupBox("Supercell");sf=QFormLayout(sb);sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);sf.setVerticalSpacing(4)
         row=QHBoxLayout();self.nx=QSpinBox();self.ny=QSpinBox();self.nz=QSpinBox()
         for s in(self.nx,self.ny,self.nz): s.setRange(1,2500);s.setValue(20);s.setMinimumWidth(55);s.valueChanged.connect(self._us)
+        self.nx.setToolTip(
+            "Number of unit cells along X axis. Sets the X dimension of\n"
+            "the particle: physical size = nx × a (lattice constant)."
+        )
+        self.ny.setToolTip(
+            "Number of unit cells along Y axis. Sets the Y dimension of\n"
+            "the particle: physical size = ny × b."
+        )
+        self.nz.setToolTip(
+            "Number of unit cells along Z axis. Sets the Z dimension of\n"
+            "the particle: physical size = nz × c."
+        )
         row.addWidget(QLabel("nx"));row.addWidget(self.nx);row.addWidget(QLabel("ny"));row.addWidget(self.ny);row.addWidget(QLabel("nz"));row.addWidget(self.nz);row.addStretch()
-        sf.addRow("Cells:",row);self.shp=QComboBox();sf.addRow("Shape:",self.shp);self.sl=QLabel();self.sl.setStyleSheet("color:#8b949e;font-size:9pt");sf.addRow(self.sl);ll.addWidget(sb)
-        vr=QHBoxLayout();self.bc=QCheckBox("Bonds");vr.addWidget(self.bc);self.stc=QCheckBox("Strain");vr.addWidget(self.stc);self.dvc=QCheckBox("Disloc. viz");vr.addWidget(self.dvc);vr.addStretch();ll.addLayout(vr)
+        sf.addRow("Cells:",row);self.shp=QComboBox()
+        self.shp.setToolTip(
+            "Particle shape carved from the rectangular supercell.\n"
+            "  • cube:        the whole box\n"
+            "  • sphere:       inscribed sphere\n"
+            "  • cylinder:     inscribed cylinder along Z\n"
+            "  • hexagonal_prism:  hexagonal cross-section\n"
+            "  • octahedron / dodecahedron: faceted shapes\n"
+            "Available shapes depend on the material's symmetry."
+        )
+        sf.addRow("Shape:",self.shp);self.sl=QLabel();self.sl.setStyleSheet("color:#8b949e;font-size:9pt");sf.addRow(self.sl);ll.addWidget(sb)
+        vr=QHBoxLayout();self.bc=QCheckBox("Bonds");self.bc.setToolTip("Draw atomic bonds (slows rendering with many atoms)")
+        vr.addWidget(self.bc);self.stc=QCheckBox("Strain");self.stc.setToolTip("Color atoms by local strain magnitude (if strain is enabled)")
+        vr.addWidget(self.stc);self.dvc=QCheckBox("Disloc. viz");self.dvc.setToolTip("Highlight atoms near the dislocation core")
+        vr.addWidget(self.dvc);vr.addStretch();ll.addLayout(vr)
         # Dislocation: line + loop tabs
         db=QGroupBox("Defects");dv=QVBoxLayout(db);dv.setSpacing(4)
         # Line dislocation
-        self.dck=QCheckBox("Line dislocation");dv.addWidget(self.dck)
+        self.dck=QCheckBox("Line dislocation");self.dck.setToolTip(
+            "Add a single straight-line dislocation. The displacement field\n"
+            "follows Volterra elasticity (edge: Burgers vector ⊥ line, screw:\n"
+            "Burgers vector ∥ line, mixed: arbitrary angle)."
+        );dv.addWidget(self.dck)
         self.df=QFrame();dg=QGridLayout(self.df);dg.setContentsMargins(2,2,2,2);dg.setHorizontalSpacing(8);dg.setVerticalSpacing(5)
-        self.dt=QComboBox();self.dt.addItems(["edge","screw","mixed"]);self.dd=QComboBox();self.dd.addItems(["Z","Y","X"])
+        self.dt=QComboBox();self.dt.addItems(["edge","screw","mixed"])
+        self.dt.setToolTip(
+            "Dislocation character:\n"
+            "  • edge:   Burgers vector perpendicular to line\n"
+            "  • screw:  Burgers vector parallel to line\n"
+            "  • mixed:  combination of both"
+        )
+        self.dd=QComboBox();self.dd.addItems(["Z","Y","X"])
+        self.dd.setToolTip("Direction of the dislocation line in crystal axes.")
         dg.addWidget(QLabel("Type:"),0,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dt,0,1);dg.addWidget(QLabel("Line:"),0,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dd,0,3)
-        self.dpx=_dbl(0,1,.5,3);self.dpy=_dbl(0,1,.5,3)
+        self.dpx=_dbl(0,1,.5,3);self.dpx.setToolTip("X position of the dislocation core as a fraction (0-1) of the particle.")
+        self.dpy=_dbl(0,1,.5,3);self.dpy.setToolTip("Y position of the dislocation core as a fraction (0-1) of the particle.")
         dg.addWidget(QLabel("X:"),1,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dpx,1,1);dg.addWidget(QLabel("Y:"),1,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dpy,1,3)
-        self.db_=_dbl(0,50,0,3," A");self.db_.setSpecialValueText("auto");self.dnu=_dbl(0,.5,.3,3)
+        self.db_=_dbl(0,50,0,3," A");self.db_.setSpecialValueText("auto")
+        self.db_.setToolTip(
+            "Magnitude of the Burgers vector in Ångström.\n"
+            "Set to 0 (= 'auto') to use the lattice constant 'a'."
+        )
+        self.dnu=_dbl(0,.5,.3,3);self.dnu.setToolTip(
+            "Poisson's ratio ν. Controls the radial vs. tangential strain ratio\n"
+            "for edge/mixed dislocations. Typical metal: 0.3."
+        )
         dg.addWidget(QLabel("|b|:"),2,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.db_,2,1);dg.addWidget(QLabel("nu:"),2,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dnu,2,3)
         self.df.setVisible(False);dv.addWidget(self.df);self.dck.toggled.connect(self.df.setVisible)
         # Loop dislocation
-        self.lck=QCheckBox("Dislocation loop (prismatic)");dv.addWidget(self.lck)
+        self.lck=QCheckBox("Dislocation loop (prismatic)")
+        self.lck.setToolTip(
+            "Add a prismatic dislocation loop (closed circular line dislocation).\n"
+            "Common defect in irradiated and quenched materials."
+        )
+        dv.addWidget(self.lck)
         self.lf=QFrame();lg=QGridLayout(self.lf);lg.setContentsMargins(2,2,2,2);lg.setHorizontalSpacing(8);lg.setVerticalSpacing(5)
-        self.lcx=_dbl(0,1,.5,3);self.lcy=_dbl(0,1,.5,3);self.lcz=_dbl(0,1,.5,3)
+        self.lcx=_dbl(0,1,.5,3);self.lcx.setToolTip("X position of the loop center (fraction 0-1).")
+        self.lcy=_dbl(0,1,.5,3);self.lcy.setToolTip("Y position of the loop center (fraction 0-1).")
+        self.lcz=_dbl(0,1,.5,3);self.lcz.setToolTip("Z position of the loop center (fraction 0-1).")
         lg.addWidget(QLabel("Cx:"),0,0,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcx,0,1);lg.addWidget(QLabel("Cy:"),0,2,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcy,0,3);lg.addWidget(QLabel("Cz:"),0,4,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcz,0,5)
-        self.lr=_dbl(1,500,20,1," A");self.lb=_dbl(0,50,0,3," A");self.lb.setSpecialValueText("auto");self.ln=QComboBox();self.ln.addItems(["Z","Y","X"]);self.lnu2=_dbl(0,.5,.3,3)
+        self.lr=_dbl(1,500,20,1," A");self.lr.setToolTip("Loop radius in Ångström.")
+        self.lb=_dbl(0,50,0,3," A");self.lb.setSpecialValueText("auto")
+        self.lb.setToolTip("Burgers vector magnitude in Ångström (= 'auto' uses 'a').")
+        self.ln=QComboBox();self.ln.addItems(["Z","Y","X"])
+        self.ln.setToolTip("Loop normal direction (the loop plane is perpendicular to this).")
+        self.lnu2=_dbl(0,.5,.3,3);self.lnu2.setToolTip("Poisson's ratio ν (typical metal: 0.3).")
         lg.addWidget(QLabel("R:"),1,0,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lr,1,1);lg.addWidget(QLabel("|b|:"),1,2,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lb,1,3);lg.addWidget(QLabel("N:"),1,4,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.ln,1,5)
         self.lf.setVisible(False);dv.addWidget(self.lf);self.lck.toggled.connect(self.lf.setVisible)
         ll.addWidget(db)
         stb=QGroupBox("Analytical strain");stf=QFormLayout(stb);stf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);stf.setVerticalSpacing(4)
-        self.strc=QComboBox();self.strc.addItems(["none","radial_gradient","edge_dislocation","random"]);stf.addRow("Type:",self.strc)
-        self.strm=_dbl(0,.1,1e-4,6);stf.addRow("eps:",self.strm);ll.addWidget(stb)
-        self.bb=QPushButton("Build & Visualize");self.bb.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt");self.bb.clicked.connect(self._bd);ll.addWidget(self.bb)
+        self.strc=QComboBox();self.strc.addItems(["none","radial_gradient","edge_dislocation","random"])
+        self.strc.setToolTip(
+            "Add a parameterized strain field on top of the rigid lattice:\n"
+            "  • none:              no strain (default)\n"
+            "  • radial_gradient:   strain grows from center outward\n"
+            "  • edge_dislocation:  Volterra edge-dislocation field\n"
+            "  • random:            Gaussian random field (smoothed)"
+        )
+        stf.addRow("Type:",self.strc)
+        self.strm=_dbl(0,.1,1e-4,6);self.strm.setToolTip(
+            "Peak strain magnitude (dimensionless). Typical BCDI: 1e-4 to 1e-3.\n"
+            "0 = no strain."
+        )
+        stf.addRow("eps:",self.strm);ll.addWidget(stb)
+        self.bb=QPushButton("Build & Visualize");self.bb.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt")
+        self.bb.setToolTip("Build the supercell, apply strain/dislocations, and render the 3D lattice.")
+        self.bb.clicked.connect(self._bd);ll.addWidget(self.bb)
         self.pg=QProgressBar();ll.addWidget(self.pg);self.lg=QPlainTextEdit();self.lg.setReadOnly(True);self.lg.setMaximumHeight(65);ll.addWidget(self.lg);ll.addStretch();sc.setWidget(inner);root.addWidget(sc)
         right=QWidget();rv=QVBoxLayout(right);rv.setContentsMargins(0,0,0,0);rv.addWidget(QLabel("3D Lattice"))
         if _HAS_WEB: self.viz=QWebEngineView();self.viz.setHtml(_ph("Build lattice."))
@@ -182,33 +276,108 @@ class T2(QWidget):
         mh=QHBoxLayout();mh.setSpacing(8);lc=QVBoxLayout();lc.setSpacing(4)
         # Beam
         bb=QGroupBox("X-ray beam");bf=QFormLayout(bb);bf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);bf.setVerticalSpacing(3)
-        self.keV=_dbl(.5,100,10,2," keV");self.keV.valueChanged.connect(self._ul);self.keV.valueChanged.connect(lambda:self._rt.start())
-        self.ll_=QLabel();self.ll_.setStyleSheet("color:#8b949e;font-size:9pt");self._ul();self.pol=_dbl(0,1,1,2);self.bsz=_dbl(0.1,1000,1,1," um")
+        self.keV=_dbl(.5,100,10,2," keV")
+        self.keV.setToolTip(
+            "X-ray photon energy in kilo-electron-volts.\n"
+            "Common BCDI beamline energies: 7–12 keV.\n"
+            "Higher energy → shorter wavelength → tighter 2θ angles."
+        )
+        self.keV.valueChanged.connect(self._ul);self.keV.valueChanged.connect(lambda:self._rt.start())
+        self.ll_=QLabel();self.ll_.setStyleSheet("color:#8b949e;font-size:9pt");self._ul()
+        self.pol=_dbl(0,1,1,2)
+        self.pol.setToolTip(
+            "Polarization factor (0 to 1).\n"
+            "1 = full horizontal polarization (typical synchrotron sigma-pol)\n"
+            "0 = no polarization correction."
+        )
+        self.bsz=_dbl(0.1,1000,1,1," um")
+        self.bsz.setToolTip(
+            "Incident beam size (FWHM) at the sample in micrometers.\n"
+            "Typical focused beam: 0.5–3 μm. Affects illumination function\n"
+            "in coherent diffraction simulation."
+        )
         bf.addRow("Energy:",self.keV);bf.addRow("",self.ll_);bf.addRow("Pol:",self.pol);bf.addRow("Beam size:",self.bsz);lc.addWidget(bb)
         # Detector with preset selector and NX x NY
         db=QGroupBox("Detector");dv=QVBoxLayout(db);dv.setSpacing(3)
         pr=QHBoxLayout();pr.addWidget(QLabel("Preset:"));self.det_combo=QComboBox()
+        self.det_combo.setToolTip(
+            "Pre-configured detector. Auto-fills pixel count and pixel size.\n"
+            "  • Maxipix (ID01):  516×516, 55 μm pixels\n"
+            "  • Eiger 2M:        1062×1028, 75 μm pixels\n"
+            "  • Custom:          set values manually"
+        )
         for k in DETECTOR_PRESETS: self.det_combo.addItem(k)
         self.det_combo.currentTextChanged.connect(self._det_preset);pr.addWidget(self.det_combo,1);dv.addLayout(pr)
         df=QFormLayout();df.setLabelAlignment(Qt.AlignmentFlag.AlignRight);df.setVerticalSpacing(3)
         self.det_d=_dbl(.05,10,.5,3," m")
+        self.det_d.setToolTip(
+            "Sample-to-detector distance in meters.\n"
+            "Determines q-space resolution: closer = smaller q range, farther =\n"
+            "finer q sampling. Typical BCDI: 0.5–2 m."
+        )
         # NX x NY row
         pxr=QHBoxLayout();self.det_nx=QSpinBox();self.det_nx.setRange(32,4096);self.det_nx.setValue(128)
-        pxr.addWidget(self.det_nx);pxr.addWidget(QLabel("x"));self.det_ny=QSpinBox();self.det_ny.setRange(32,4096);self.det_ny.setValue(128);pxr.addWidget(self.det_ny)
+        self.det_nx.setToolTip("Number of detector pixels in the horizontal (X) direction.")
+        pxr.addWidget(self.det_nx);pxr.addWidget(QLabel("x"));self.det_ny=QSpinBox();self.det_ny.setRange(32,4096);self.det_ny.setValue(128)
+        self.det_ny.setToolTip("Number of detector pixels in the vertical (Y) direction.")
+        pxr.addWidget(self.det_ny)
         self.det_sz=_dbl(1,500,55,1," um")
+        self.det_sz.setToolTip(
+            "Physical pixel pitch in micrometers.\n"
+            "Maxipix: 55 μm.  Eiger 2M: 75 μm.\n"
+            "Smaller pixels → finer angular resolution per pixel."
+        )
         df.addRow("Distance:",self.det_d);df.addRow("Pixels:",pxr);df.addRow("Pixel size:",self.det_sz)
         # Rocking: "Steps" label (= number of rocking curve angular positions)
         self.rock=_dbl(.0001,1,.00315,5," deg");self.rock.setDecimals(5)
+        self.rock.setToolTip(
+            "Angular step size between rocking curve points, in degrees.\n"
+            "Sets the q-resolution along the rocking direction.\n"
+            "Typical: 0.001–0.01°. Smaller = finer rocking sampling but more frames."
+        )
         self.steps=QSpinBox();self.steps.setRange(8,2048);self.steps.setValue(128)
+        self.steps.setToolTip(
+            "Number of rocking curve points (i.e., number of detector frames\n"
+            "in the scan). Total rocking range = step × steps.\n"
+            "Typical: 50–200 for full Bragg peak coverage."
+        )
         df.addRow("Rock step:",self.rock);df.addRow("Steps:",self.steps)
         # Oversampling with tooltip
-        self.os=_dbl(1,20,5,1);self.os.setToolTip("Oversampling ratio: simulation grid = OS x Nyquist.\nHigher = finer q-resolution but slower.\nTypical BCDI: 3-8")
+        self.os=_dbl(1,20,5,1);self.os.setToolTip(
+            "Oversampling ratio: simulation grid = OS × Nyquist.\n"
+            "Higher = finer q-resolution but slower.\n"
+            "Typical BCDI: 3–8.  Reconstruction is only possible if OS > 2."
+        )
         os_row=QHBoxLayout();os_row.addWidget(self.os);os_lbl=QLabel("(oversampling)");os_lbl.setStyleSheet("color:#8b949e;font-size:8pt");os_row.addWidget(os_lbl)
         df.addRow("OS ratio:",os_row)
         dv.addLayout(df);lc.addWidget(db)
         # Coherence
         cb=QGroupBox("Coherence");cf=QFormLayout(cb);cf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);cf.setVerticalSpacing(3)
-        self.sh=_dbl(0,10000,300,1," um");self.sv=_dbl(0,10000,10,1," um");self.sd=_dbl(.1,500,50,1," m");self.bw=_dbl(1e-6,.1,1e-4,6);self.bw.setDecimals(6)
+        self.sh=_dbl(0,10000,300,1," um")
+        self.sh.setToolTip(
+            "Horizontal source size (FWHM) at the source point, in micrometers.\n"
+            "Affects horizontal transverse coherence at the sample.\n"
+            "Typical synchrotron: 100–500 μm. Set to 0 to disable coherence model."
+        )
+        self.sv=_dbl(0,10000,10,1," um")
+        self.sv.setToolTip(
+            "Vertical source size (FWHM) at the source point, in micrometers.\n"
+            "Affects vertical transverse coherence at the sample.\n"
+            "Typical synchrotron: 5–50 μm (smaller than H — synchrotrons are\n"
+            "vertically coherent by design)."
+        )
+        self.sd=_dbl(.1,500,50,1," m")
+        self.sd.setToolTip(
+            "Source-to-sample distance in meters.\n"
+            "Longer distance → better transverse coherence (larger coherence\n"
+            "length at the sample). Typical: 30–80 m."
+        )
+        self.bw=_dbl(1e-6,.1,1e-4,6);self.bw.setDecimals(6)
+        self.bw.setToolTip(
+            "Relative energy bandwidth ΔE/E of the monochromator.\n"
+            "Sets the longitudinal coherence length.\n"
+            "Si(111) monochromator: ~1.3×10⁻⁴.  Multilayer: 10⁻² to 10⁻³."
+        )
         cf.addRow("Src H:",self.sh);cf.addRow("Src V:",self.sv);cf.addRow("Src D:",self.sd);cf.addRow("dE/E:",self.bw);lc.addWidget(cb);lc.addStretch();mh.addLayout(lc)
         # Center: reflection chart
         cc=QVBoxLayout();cc.setSpacing(4);cc.addWidget(QLabel("Reflection intensities"))

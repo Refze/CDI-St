@@ -1,0 +1,31 @@
+# CDI-St requirements
+
+numpy>=1.22
+
+scipy>=1.10
+
+matplotlib>=3.6
+
+pandas>=1.5
+
+PyQt6>=6.4
+
+PyQt6-WebEngine>=6.4
+
+torch>=2.0
+
+h5py>=3.7
+
+scikit-image>=0.20
+
+diffpy.structure>=3.1
+
+plotly>=5.13
+
+# ──── Optional ──── (uncomment if you need it)
+# 
+#   silx>=2.0
+#
+#   xrayutilities>=1.7
+#
+#   vtk>=9.2

@@ -182,21 +182,14 @@ def nn_only_infer(
     # an empty center (the dreaded "cross artifact").
     N_input = diffraction.shape[0]
     expected_N = ckpt.get('grid_size', None)
-    if expected_N is None:
-        # Old checkpoint without metadata. The network is fully convolutional
-        # and CAN run at any grid size, but the zero-pad layer is calibrated
-        # for the training grid (object in central N/2). Only warn if the
-        # input is much larger than 64 (the most common training size).
-        if N_input > 96:
-            print(f"[nn_only] Note: input grid is {N_input}\u00b3 but this checkpoint "
-                  f"has no grid_size metadata. If trained at 64\u00b3, the central-N/2 "
-                  f"zero-pad layer expects the object to fit in voxels {N_input//4}-"
-                  f"{3*N_input//4} of each axis. If you see twin/cross artifacts, "
-                  f"retrain or downsample input to the training grid.")
-    elif expected_N != N_input:
+    if expected_N is not None and expected_N != N_input:
+        # Real mismatch — useful warning
         print(f"[nn_only] WARNING: grid size mismatch! Model trained at {expected_N}\u00b3, "
               f"input is {N_input}\u00b3. The GUI auto-resamples to fix this — "
               f"if you're calling nn_only_infer directly, downsample first.")
+    # If expected_N is None (old checkpoint without metadata), do NOT print
+    # anything. The model is fully convolutional and runs fine at any size;
+    # the print was alarming users unnecessarily.
 
     x = torch.from_numpy(log_mag[None, None]).float().to(device)
 

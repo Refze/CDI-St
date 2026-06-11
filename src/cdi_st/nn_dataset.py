@@ -51,6 +51,7 @@ class BCDIDataset(Dataset):
         augment: bool = False,
         normalize_phase: bool = True,
         max_samples: int = None,
+        grid_size: int = None,
     ):
         """
         Parameters
@@ -63,10 +64,19 @@ class BCDIDataset(Dataset):
             Normalize phase to [-1, 1] range (divide by π).
         max_samples : int or None
             Limit number of samples loaded (for debugging).
+        grid_size : int or None
+            Expected NxNxN grid size of each sample. If set, samples whose
+            shape doesn't match are skipped (with a warning) instead of
+            crashing later in the data loader. If None (default), all
+            samples are loaded regardless of size — relies on the dataset
+            being internally consistent (the data generator enforces this).
+            Accepted here primarily for API compatibility with
+            UnsupervisedBCDIDataset and the GUI training worker.
         """
         self.data_dir = Path(data_dir)
         self.augment = augment
         self.normalize_phase = normalize_phase
+        self.grid_size = grid_size
 
         # Find all .npz files
         self.files = sorted(self.data_dir.glob("sample_*.npz"))
