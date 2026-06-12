@@ -133,11 +133,19 @@ class BCDIDataset(Dataset):
         support_tensor = torch.from_numpy(support[np.newaxis]).float()
 
         return {
+            # Primary keys (for downstream code that uses these names)
             'input': input_tensor,
             'target_phase': phase_tensor,
             'support': support_tensor,
             'amp_scale': amp_scale,
             'file': str(fpath.name),
+            # Aliases needed by the GUI's supervised training worker.
+            # The GUI uses 'phase_true' (matches the .npz field name) and
+            # 'amplitude' (the raw amplitude for the FFT consistency loss in
+            # BCDIPhaseLoss). These point to the same tensors as 'target_phase'
+            # and to a raw-amplitude tensor respectively.
+            'phase_true': phase_tensor,
+            'amplitude': torch.from_numpy(amplitude[np.newaxis]).float(),
         }
 
     def _augment(

@@ -197,27 +197,35 @@ class BCDIPhaseLoss(nn.Module):
     Combined loss for BCDI phase prediction.
 
     Components:
-    1. Masked MSE loss: |phase_pred - phase_true|² inside the support only
-       (phase outside the crystal is physically meaningless)
+    1. Masked MSE loss on phase: |phase_pred - phase_true|² inside the
+       support only (phase outside the crystal is physically meaningless).
+       Controlled by ``alpha_amp`` (alias: ``alpha``).
 
     2. FFT consistency loss: the predicted phase + measured amplitude should
        produce a real-space object that is consistent with the support.
-       This acts as a physics-informed regularizer.
+       Acts as a physics-informed regularizer.
+       Controlled by ``beta_phase`` (alias: ``beta``).
 
     3. Gradient smoothness loss: penalizes sharp phase jumps inside the
        support (real strain fields are smooth, not noisy).
+       Controlled by ``gamma_diff`` (alias: ``gamma``).
 
-    The weights can be tuned:
-        alpha: MSE weight (default 1.0)
-        beta:  FFT consistency weight (default 0.1)
-        gamma: smoothness weight (default 0.01)
+    Parameters can be passed using either the descriptive names
+    (``alpha_amp``, ``beta_phase``, ``gamma_diff``) used in the GUI, or
+    the Greek-letter aliases (``alpha``, ``beta``, ``gamma``) used in
+    the original API. Descriptive names take precedence if both are passed.
     """
 
-    def __init__(self, alpha: float = 1.0, beta: float = 0.1, gamma: float = 0.01):
+    def __init__(self,
+                 alpha_amp: float = None, beta_phase: float = None,
+                 gamma_diff: float = None,
+                 alpha: float = 1.0, beta: float = 0.1, gamma: float = 0.01):
         super().__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+        # The GUI's descriptive names take precedence; fall back to the
+        # Greek-letter ones (kept for backward compatibility with old scripts)
+        self.alpha = alpha_amp if alpha_amp is not None else alpha
+        self.beta  = beta_phase if beta_phase is not None else beta
+        self.gamma = gamma_diff if gamma_diff is not None else gamma
 
     def forward(
         self,
@@ -225,6 +233,7 @@ class BCDIPhaseLoss(nn.Module):
         phase_true: torch.Tensor,
         support: torch.Tensor,
         amplitude: torch.Tensor = None,
+        diff_amp: torch.Tensor = None,
     ) -> dict:
         """
         Compute combined loss.
@@ -234,12 +243,16 @@ class BCDIPhaseLoss(nn.Module):
         phase_pred : [B, 1, N, N, N]  predicted phase (normalized [-1, 1])
         phase_true : [B, 1, N, N, N]  ground truth phase (normalized [-1, 1])
         support    : [B, 1, N, N, N]  binary support mask
-        amplitude  : [B, 1, N, N, N]  measured amplitude (optional, for FFT loss)
+        amplitude  : [B, 1, N, N, N]  measured amplitude (for FFT loss).
+                     Accepted as either ``amplitude=`` or ``diff_amp=``.
 
         Returns
         -------
         dict with 'total', 'mse', 'fft_consistency', 'smoothness'
         """
+        # Accept either keyword for the amplitude tensor
+        if amplitude is None and diff_amp is not None:
+            amplitude = diff_amp
         # ── 1. Masked MSE loss ────────────────────────────────────────────
         n_support = support.sum().clamp(min=1)
         mse = ((phase_pred - phase_true) ** 2 * support).sum() / n_support

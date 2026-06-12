@@ -46,19 +46,306 @@ from typing import Optional, Tuple
 
 # Common paths where BCDI diffraction volumes live in different beamline formats
 KNOWN_PATHS = [
-    # ID01 / BLISS — most common for user
+    # ID01 / BLISS — most common for ESRF users
     '/entry_0000/measurement/merlin/data',
     '/entry_0000/measurement/eiger2M/data',
     '/entry_0000/measurement/mpx1x4/data',
     '/entry_0000/measurement/maxipix/data',
+    # P10 / PETRA III (DESY) — NeXus-style
+    '/entry/data/data',
+    '/entry/instrument/detector/data',
+    '/entry/instrument/eiger_4m/data',
+    '/entry/instrument/eiger_500k/data',
+    '/entry/instrument/eiger/data',
+    '/entry/instrument/lambda/data',
+    # CXI (Coherent X-ray Imaging) format
+    '/entry_1/data_1/data',
+    '/entry_1/instrument_1/detector_1/data',
     # 34-ID-C (APS)
     '/entry1/instrument/detector/data',
     # Generic
     '/data',
-    '/entry/data/data',
     '/intensity',
     '/diffraction',
 ]
+
+
+def _find_p10_master(data_path: str) -> Optional[str]:
+    """
+    For a P10 'data file' like 'align_03_01698_data_000001.h5', look for the
+    corresponding 'master.h5' in the same directory.
+
+    P10 (and most modern Eiger setups) writes scans as one 'master' file plus
+    one or more numbered data chunks. The master file contains a Virtual
+    Dataset (VDS) that links the chunks together. Reading a single chunk
+    directly often fails or yields partial data — the master is the correct
+    entry point.
+
+    Returns the path to the master file if found, else None.
+    """
+    import os, re
+    if not data_path:
+        return None
+    base = os.path.basename(data_path)
+    dirname = os.path.dirname(os.path.abspath(data_path))
+    # P10 patterns we've seen in the wild:
+    #   align_03_01698_data_000001.h5  ↔  align_03_01698_master.h5
+    #   scan_0042_data_000123.h5       ↔  scan_0042_master.h5
+    #   sample_0001_00042_data_000001.h5 ↔ sample_0001_00042_master.h5
+    m = re.match(r'^(.*?)_data_\d+\.h5$', base, re.IGNORECASE)
+    if not m:
+        return None
+    prefix = m.group(1)
+    candidate = os.path.join(dirname, f"{prefix}_master.h5")
+    if os.path.exists(candidate):
+        return candidate
+    # Some setups use ".nxs" extension instead
+    candidate = os.path.join(dirname, f"{prefix}_master.nxs")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+def parse_p10_fio(fio_path: str) -> dict:
+    """
+    Parse a P10 (DESY) '.fio' metadata file.
+
+    .fio is a custom ASCII format used at PETRA III. Structure:
+
+        !
+        ! Comments
+        !
+        %c
+         scan_command_here
+        %p
+         param_name = value
+         ...
+        %d
+         Col 1 motor_or_counter_name DOUBLE
+         Col 2 mpx4inr INTEGER
+         ...
+         value1 value2 ...
+         value1 value2 ...
+
+    Returns a dict with:
+        scan_command : str
+        params : dict[str, str/float]    # %p block
+        columns : list[str]              # column names from %d block
+        data : dict[str, np.ndarray]     # column data
+    """
+    import re
+    result = {
+        "scan_command": "",
+        "params": {},
+        "columns": [],
+        "data": {},
+    }
+    try:
+        with open(fio_path, "r", encoding="latin-1") as f:
+            text = f.read()
+    except Exception:
+        return result
+
+    # Section parser: split by %c / %p / %d markers
+    section = None
+    data_rows = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("!"):
+            continue
+        if s == "%c":
+            section = "c"; continue
+        if s == "%p":
+            section = "p"; continue
+        if s == "%d":
+            section = "d"; continue
+        if section == "c":
+            # First non-comment line under %c is the scan command
+            if not result["scan_command"]:
+                result["scan_command"] = s
+        elif section == "p":
+            # name = value
+            if "=" in s:
+                k, _, v = s.partition("=")
+                k = k.strip()
+                v = v.strip()
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+                result["params"][k] = v
+        elif section == "d":
+            # Header lines: "Col N name TYPE", then data rows
+            m = re.match(r"Col\s+(\d+)\s+(\S+)\s+\S+", s, re.IGNORECASE)
+            if m:
+                result["columns"].append(m.group(2))
+            else:
+                # Data row
+                fields = s.split()
+                if fields and all(_is_number(x) for x in fields):
+                    data_rows.append([float(x) for x in fields])
+
+    if data_rows and result["columns"]:
+        arr = np.asarray(data_rows)
+        ncols = min(arr.shape[1], len(result["columns"]))
+        for i in range(ncols):
+            result["data"][result["columns"][i]] = arr[:, i]
+    return result
+
+
+def _is_number(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def diagnose_vds(dataset, dataset_path: str) -> str:
+    """
+    Diagnose why a Virtual Dataset (VDS) read might fail.
+
+    Returns a human-readable string listing the VDS sources and whether each
+    source file is reachable. Used to translate cryptic HDF5 errors into
+    actionable messages.
+    """
+    import os
+    lines = [f"  Dataset '{dataset_path}' is a Virtual Dataset (VDS)."]
+    try:
+        sources = dataset.virtual_sources()
+    except Exception as e:
+        lines.append(f"  Could not enumerate VDS sources: {e}")
+        return "\n".join(lines)
+
+    if not sources:
+        lines.append("  But it reports no VDS sources — file may be corrupted.")
+        return "\n".join(lines)
+
+    lines.append(f"  VDS references {len(sources)} source file(s):")
+    n_missing = 0
+    seen = set()
+    for src in sources:
+        try:
+            src_file = src.file_name
+            src_path = src.dset_name
+        except AttributeError:
+            try:
+                src_file = src[0]
+                src_path = src[1]
+            except Exception:
+                lines.append(f"    (unparseable source)")
+                continue
+        key = (src_file, src_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            master_dir = os.path.dirname(os.path.abspath(dataset.file.filename))
+        except Exception:
+            master_dir = ""
+        if not os.path.isabs(src_file):
+            full_src = os.path.join(master_dir, src_file)
+        else:
+            full_src = src_file
+        exists = os.path.exists(full_src)
+        marker = "OK   " if exists else "MISS "
+        if not exists:
+            n_missing += 1
+        lines.append(f"    [{marker}] {src_file}  ->  {src_path}")
+    if n_missing:
+        lines.append(f"\n  {n_missing} source file(s) are MISSING from "
+                     f"the directory. The master file expects them next to "
+                     f"itself. Copy them in, or open one of the existing "
+                     f"chunk files directly.")
+    return "\n".join(lines)
+
+
+def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
+                          verbose: bool = False):
+    """
+    Read a dataset, with graceful fallback if it's a VDS whose sources fail.
+
+    Strategy:
+        1. If the dataset is a VDS, check whether all its source files exist.
+           If any are missing, REFUSE the bulk read and raise a clear error
+           (because h5py would silently fill with zeros, producing useless
+           all-zero output).
+        2. Otherwise, try bulk read.
+        3. If bulk read fails with "open directory" (= VDS source missing
+           at read time), report the diagnostic.
+    """
+    # Step 1: pre-check VDS source reachability
+    if hasattr(ds, 'is_virtual') and ds.is_virtual:
+        if not _vds_is_readable(ds):
+            diag = diagnose_vds(ds, dpath)
+            raise IOError(
+                f"Dataset '{dpath}' is a Virtual Dataset with MISSING "
+                f"source files. h5py would silently return ZEROS, so we "
+                f"refuse the read to avoid producing garbage output.\n\n"
+                f"{diag}\n\n"
+                f"To proceed:\n"
+                f"  - Open the chunk file's OWN data path "
+                f"(usually /entry/data/data), not the master's VDS, OR\n"
+                f"  - Provide all missing chunk files in the same directory, OR\n"
+                f"  - Use load_p10_chunks_directly() to bypass VDS entirely."
+            )
+
+    # Step 2: bulk read
+    try:
+        if len(ds.shape) == 4:
+            if ds.shape[1] == 1:
+                ds_arr = ds[:, 0, :, :]
+            else:
+                ds_arr = ds[...]
+        else:
+            ds_arr = ds[...]
+        if max_frames is not None and ds_arr.shape[0] > max_frames:
+            start = (ds_arr.shape[0] - max_frames) // 2
+            ds_arr = ds_arr[start:start + max_frames]
+        return np.asarray(ds_arr, dtype=np.float32)
+    except (OSError, IOError, RuntimeError) as e:
+        bulk_err = str(e)
+        if "open directory" not in bulk_err and "external" not in bulk_err.lower():
+            # Not a VDS source issue - re-raise as-is
+            raise
+
+    # Step 3: VDS read failed at runtime -> diagnose
+    diag = diagnose_vds(ds, dpath)
+    if verbose:
+        print(f"  Bulk read failed (VDS source missing). Diagnosing:")
+        print(diag)
+        print(f"  Attempting frame-by-frame read to skip broken sources...")
+
+    # Try frame-by-frame to salvage what we can
+    n_frames = ds.shape[0]
+    salvaged = []
+    skipped = 0
+    for i in range(n_frames):
+        try:
+            if len(ds.shape) == 4:
+                frame = ds[i, 0] if ds.shape[1] == 1 else ds[i]
+            else:
+                frame = ds[i]
+            salvaged.append(np.asarray(frame, dtype=np.float32))
+        except (OSError, IOError, RuntimeError):
+            skipped += 1
+            continue
+    if not salvaged:
+        raise IOError(
+            f"Could not read any frames from {dpath}.\n\n{diag}\n\n"
+            f"All {n_frames} frames are inaccessible. To fix this:\n"
+            f"  - Either open the master file in CDI-ST (master finds chunks "
+            f"automatically), OR\n"
+            f"  - Copy ALL of the *_data_NNNNNN.h5 chunk files into the same "
+            f"directory as this file, OR\n"
+            f"  - If you only have one chunk file, give CDI-ST a dataset path "
+            f"that lives INSIDE the chunk (not the master's VDS). The chunk "
+            f"normally has its data at /entry/data/data."
+        )
+    if verbose and skipped:
+        print(f"  Skipped {skipped} broken frames; recovered "
+              f"{len(salvaged)} frames.")
+    return np.stack(salvaged).astype(np.float32)
 
 
 def inspect_h5(path: str, max_depth: int = 6):
@@ -93,34 +380,193 @@ def inspect_h5(path: str, max_depth: int = 6):
     print("=" * 62)
 
 
+def _vds_is_readable(ds) -> bool:
+    """
+    Check if a VDS's source files are reachable WITHOUT actually reading.
+    Returns True if not VDS, or if VDS and at least one source exists.
+    """
+    import os
+    try:
+        if not (hasattr(ds, 'is_virtual') and ds.is_virtual):
+            return True   # not VDS, assume readable
+        srcs = ds.virtual_sources()
+        if not srcs:
+            return True   # claims VDS but no sources -> let read decide
+        master_dir = os.path.dirname(os.path.abspath(ds.file.filename))
+        for src in srcs:
+            try:
+                src_file = src.file_name
+            except AttributeError:
+                try:
+                    src_file = src[0]
+                except Exception:
+                    continue
+            full = src_file if os.path.isabs(src_file) else os.path.join(master_dir, src_file)
+            if os.path.exists(full):
+                return True  # at least one source file is reachable
+        return False  # VDS with all sources missing
+    except Exception:
+        return True   # be permissive on introspection errors
+
+
 def find_diffraction_dataset(h5_file):
     """
     Try known paths first, then scan for any suitable 3D dataset.
 
+    Skips Virtual Datasets whose source files are missing — picks readable
+    contiguous datasets instead. This handles the P10 case where a chunk
+    file's /entry/data/ group also contains VDS placeholders (`data_000001`,
+    `data_000002`) pointing to *other* chunk files that the user doesn't
+    have. The chunk's own contiguous data at `/entry/data/data` is preferred.
+
     Returns (path_str, dataset) or (None, None) if nothing found.
     """
-    # Try known paths
+    import h5py
+
+    # Step 1: try the known paths directly
     for p in KNOWN_PATHS:
-        if p in h5_file:
-            ds = h5_file[p]
-            if hasattr(ds, 'shape') and len(ds.shape) >= 3:
-                return p, ds
+        try:
+            if p in h5_file:
+                obj = h5_file[p]
+                if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 3:
+                    # Skip broken VDS — prefer next candidate
+                    if _vds_is_readable(obj):
+                        return p, obj
+        except (KeyError, OSError):
+            continue
 
-    # Fall back: walk the tree and pick the largest 3D dataset
-    candidates = []
-    def _collect(name, obj):
-        if hasattr(obj, 'shape') and len(obj.shape) == 3:
-            sz = int(np.prod(obj.shape))
-            if sz > 10 ** 5:  # arbitrary minimum size
-                candidates.append((sz, name, obj))
+    # Step 2: full tree walk
+    candidates_readable = []   # (size, name, dataset, prefer_score)
+    candidates_broken_vds = [] # only used as last resort
+    seen = set()
 
-    h5_file.visititems(_collect)
-    if candidates:
-        candidates.sort(reverse=True)
-        _, name, ds = candidates[0]
+    def _walk(group, prefix=""):
+        try:
+            keys = list(group.keys())
+        except (KeyError, OSError):
+            return
+        for k in keys:
+            full = f"{prefix}/{k}" if prefix else f"/{k}"
+            if full in seen:
+                continue
+            seen.add(full)
+            try:
+                obj = group[k]
+            except (KeyError, OSError):
+                continue
+            if isinstance(obj, h5py.Dataset):
+                if len(obj.shape) >= 3:
+                    sz = int(np.prod(obj.shape))
+                    if sz > 10 ** 4:
+                        if _vds_is_readable(obj):
+                            # Prefer datasets named exactly "data" (NeXus
+                            # convention) over numbered VDS placeholders
+                            score = 1 if k == "data" else 0
+                            candidates_readable.append((score, sz, full, obj))
+                        else:
+                            candidates_broken_vds.append((sz, full, obj))
+            elif isinstance(obj, h5py.Group):
+                _walk(obj, full)
+
+    _walk(h5_file)
+    if candidates_readable:
+        # Sort by (NeXus-name preference desc, size desc) - higher score first
+        candidates_readable.sort(key=lambda c: (-c[0], -c[1]))
+        _, _, name, ds = candidates_readable[0]
+        return name, ds
+    if candidates_broken_vds:
+        # All candidates are broken VDS - return the largest one so the caller
+        # can surface a helpful diagnostic error to the user
+        candidates_broken_vds.sort(reverse=True)
+        _, name, ds = candidates_broken_vds[0]
         return name, ds
 
     return None, None
+
+
+def resolve_dataset_path(h5_file, user_path: str):
+    """
+    Resolve a user-provided HDF5 path to an actual Dataset.
+
+    Handles the common confusion where the user types a Group path
+    (e.g. '/entry/data') when they should have typed the Dataset path
+    inside it (e.g. '/entry/data/data'). When the user's path lands on
+    a group, this looks one level deeper for a child named 'data' or
+    for any 3D+ dataset inside.
+
+    Returns
+    -------
+    (resolved_path, dataset)  or  raises a helpful error.
+    """
+    import h5py
+    if user_path not in h5_file:
+        raise KeyError(
+            f"Path '{user_path}' does not exist in the HDF5 file.\n"
+            f"  Use 'Inspect HDF5 structure' to see what's available."
+        )
+    obj = h5_file[user_path]
+
+    # If user typed a dataset directly, return it
+    if isinstance(obj, h5py.Dataset):
+        if len(obj.shape) < 2:
+            raise ValueError(
+                f"'{user_path}' is a {len(obj.shape)}D dataset — need at "
+                f"least 2D detector frames (or 3D scan stack)."
+            )
+        return user_path, obj
+
+    # User typed a group → look inside for the actual data
+    if isinstance(obj, h5py.Group):
+        # First: try a child called 'data' (the NeXus standard convention)
+        if 'data' in obj:
+            child = obj['data']
+            if isinstance(child, h5py.Dataset) and len(child.shape) >= 2:
+                full = (user_path.rstrip('/') + '/data')
+                return full, child
+        # Second: scan the immediate children for any 3D+ dataset
+        for k in obj.keys():
+            try:
+                child = obj[k]
+            except (KeyError, OSError):
+                continue
+            if isinstance(child, h5py.Dataset) and len(child.shape) >= 3:
+                full = (user_path.rstrip('/') + '/' + k)
+                return full, child
+        # Third: walk deeper — maybe two levels under user's group
+        for k in obj.keys():
+            try:
+                sub = obj[k]
+            except (KeyError, OSError):
+                continue
+            if isinstance(sub, h5py.Group):
+                for k2 in sub.keys():
+                    try:
+                        ds = sub[k2]
+                    except (KeyError, OSError):
+                        continue
+                    if isinstance(ds, h5py.Dataset) and len(ds.shape) >= 3:
+                        full = f"{user_path.rstrip('/')}/{k}/{k2}"
+                        return full, ds
+
+        # Nothing found inside the group — list what IS there to help the user
+        children = []
+        for k in obj.keys():
+            try:
+                c = obj[k]
+                if isinstance(c, h5py.Dataset):
+                    children.append(f"  {k}  [Dataset, shape={c.shape}]")
+                else:
+                    children.append(f"  {k}/  [Group]")
+            except Exception:
+                children.append(f"  {k}  [?]")
+        listing = "\n".join(children) if children else "  (empty group)"
+        raise ValueError(
+            f"'{user_path}' is a Group, not a Dataset.\n"
+            f"Contents of '{user_path}':\n{listing}\n\n"
+            f"Click one of the entries above (e.g. add '/data' to your path)."
+        )
+
+    raise TypeError(f"'{user_path}' is a {type(obj).__name__}, expected Dataset.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -426,38 +872,81 @@ def load_h5_diffraction(
     except ImportError:
         raise ImportError("h5py required. Install with: pip install h5py")
 
-    with h5py.File(path, 'r') as f:
+    # Auto-resolve P10-style "_data_NNNNNN.h5" → corresponding "_master.h5".
+    # Opening a data chunk directly often fails with HDF5 errors like
+    # "Can't synchronously read data (can't open directory)" because the
+    # chunk references a virtual dataset that lives in the master file.
+    original_path = path
+    master_candidate = _find_p10_master(path)
+    if master_candidate is not None:
+        if verbose:
+            print(f"  Detected P10 data file → using master: {master_candidate}")
+        path = master_candidate
+
+    try:
+        f = h5py.File(path, 'r')
+    except OSError as e:
+        msg = str(e)
+        # Translate the cryptic HDF5 error into something actionable.
+        if "open directory" in msg or "external" in msg.lower():
+            raise IOError(
+                f"Could not open {path}: this file uses a Virtual Dataset "
+                f"(VDS) that links to other files in the same directory.\n\n"
+                f"  - If you have a '_master.h5' file next to this one, open "
+                f"that one instead — CDI-ST will auto-find the data chunks.\n"
+                f"  - If files are missing from the directory, restore them or "
+                f"copy ALL related files (master + data_NNNNNN) together.\n\n"
+                f"Original HDF5 error: {msg}"
+            ) from e
+        raise
+
+    try:
         # Find the dataset
         if dataset_path is not None:
-            if dataset_path not in f:
-                raise KeyError(f"Dataset '{dataset_path}' not found in {path}")
-            ds = f[dataset_path]
-            dpath = dataset_path
+            # User provided an explicit path — but they might have given a
+            # Group rather than a Dataset (the common confusion with NeXus
+            # files where '/entry/data' is a Group containing the actual
+            # 'data' Dataset). resolve_dataset_path handles both.
+            dpath, ds = resolve_dataset_path(f, dataset_path)
+            if dpath != dataset_path and verbose:
+                print(f"  Note: '{dataset_path}' is a Group, resolved to "
+                      f"Dataset at '{dpath}'")
         else:
             dpath, ds = find_diffraction_dataset(f)
             if ds is None:
-                raise ValueError(f"Could not auto-detect diffraction data in {path}. "
-                                  "Run with --inspect to see structure, then use "
-                                  "--dataset_path to specify it explicitly.")
+                # Print the file structure to help debugging
+                try:
+                    print("\n  File structure (for debugging):")
+                    def _walk(name, obj):
+                        if hasattr(obj, 'shape'):
+                            print(f"    {name}  shape={obj.shape}  dtype={obj.dtype}")
+                    f.visititems(_walk)
+                except Exception:
+                    pass
+                f.close()
+                raise ValueError(
+                    f"Could not auto-detect diffraction data in {path}. "
+                    f"Run with inspect_h5() to see structure, then pass "
+                    f"dataset_path='/path/to/data' explicitly."
+                )
 
         if verbose:
             print(f"  Loaded dataset: {dpath}  shape={ds.shape}  dtype={ds.dtype}")
+            # If it's a VDS, mention that proactively (helps diagnose later)
+            try:
+                if hasattr(ds, 'is_virtual') and ds.is_virtual:
+                    n_src = len(ds.virtual_sources())
+                    print(f"  This is a Virtual Dataset with {n_src} external "
+                          f"source file(s).")
+            except Exception:
+                pass
 
-        # If data is 4D (e.g. scan points × detector), reshape or select
-        if len(ds.shape) == 4:
-            if ds.shape[1] == 1:
-                ds_arr = ds[:, 0, :, :]
-            else:
-                ds_arr = ds[...]
-        else:
-            ds_arr = ds[...]
-
-        # Optional frame limiting
-        if max_frames is not None and ds_arr.shape[0] > max_frames:
-            start = (ds_arr.shape[0] - max_frames) // 2
-            ds_arr = ds_arr[start:start + max_frames]
-
-        volume = np.asarray(ds_arr, dtype=np.float32)
+        # Read with graceful VDS-fallback. If sources are missing, this
+        # tries frame-by-frame and raises a helpful error if nothing readable.
+        volume = _read_dataset_safely(ds, dpath, max_frames=max_frames,
+                                       verbose=verbose)
+    finally:
+        f.close()
 
     # ── Preprocessing pipeline ────────────────────────────────────────────
     if verbose:
@@ -950,6 +1439,482 @@ def load_spec_edf_scan(
             print(f"  q-space conversion failed: {e}")
 
     return result
+
+
+def _find_chunk_internal_data_path(h5_file, hint_path: str = None) -> Optional[str]:
+    """
+    For a P10-style chunk file, find the path to its own contiguous data.
+
+    Different P10 configurations store data at different paths inside the
+    chunk:
+      - /entry/data/data            (NeXus standard)
+      - /entry/data/data_000001     (P10 with numbered datasets — common)
+      - /entry/instrument/eiger_4m/data
+      - /entry/instrument/eiger_500k/data
+      - /entry/instrument/detector/data
+      - /entry_1/data_1/data        (CXI)
+      - /entry/data_NNNN            (some BLISS setups)
+
+    This function scans the file and returns the path that:
+      (1) is a real Dataset (not a Group, not a broken VDS)
+      (2) is 3D with substantial size (> 10k voxels)
+      (3) has reachable data (or is contiguous, not VDS)
+    """
+    import h5py
+
+    # If hint_path is provided and valid, try it first
+    if hint_path and hint_path in h5_file:
+        try:
+            obj = h5_file[hint_path]
+            if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
+                if _vds_is_readable(obj):
+                    return hint_path
+        except Exception:
+            pass
+
+    # Try common P10/NeXus paths first
+    for p in [
+        '/entry/data/data',
+        '/entry/instrument/eiger_4m/data',
+        '/entry/instrument/eiger_500k/data',
+        '/entry/instrument/detector/data',
+        '/entry/instrument/lambda/data',
+        '/entry_1/data_1/data',
+        '/entry_1/instrument_1/detector_1/data',
+    ]:
+        try:
+            if p in h5_file:
+                obj = h5_file[p]
+                if (isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2
+                        and _vds_is_readable(obj)):
+                    return p
+        except Exception:
+            continue
+
+    # Scan inside /entry/data/ for ANY 3D dataset
+    # (this catches the data_NNNNNN naming convention)
+    for parent_path in ['/entry/data', '/entry/instrument']:
+        if parent_path not in h5_file:
+            continue
+        parent = h5_file[parent_path]
+        if not isinstance(parent, h5py.Group):
+            continue
+        candidates = []
+        for k in parent.keys():
+            try:
+                obj = parent[k]
+            except Exception:
+                continue
+            if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
+                if _vds_is_readable(obj):
+                    sz = int(np.prod(obj.shape))
+                    candidates.append((sz, f"{parent_path}/{k}"))
+            elif isinstance(obj, h5py.Group):
+                # One more level for e.g. /entry/instrument/eiger_4m/data
+                for k2 in obj.keys():
+                    try:
+                        ds = obj[k2]
+                    except Exception:
+                        continue
+                    if (isinstance(ds, h5py.Dataset) and len(ds.shape) >= 2
+                            and _vds_is_readable(ds)):
+                        sz = int(np.prod(ds.shape))
+                        candidates.append((sz, f"{parent_path}/{k}/{k2}"))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
+
+    # Last resort — full tree walk
+    fallback = None
+    fallback_size = 0
+    def _walk(g, prefix=""):
+        nonlocal fallback, fallback_size
+        try:
+            keys = list(g.keys())
+        except Exception:
+            return
+        for k in keys:
+            full = f"{prefix}/{k}" if prefix else f"/{k}"
+            try:
+                obj = g[k]
+            except Exception:
+                continue
+            if isinstance(obj, h5py.Dataset):
+                if (len(obj.shape) >= 2 and _vds_is_readable(obj)):
+                    sz = int(np.prod(obj.shape))
+                    if sz > fallback_size:
+                        fallback_size = sz
+                        fallback = full
+            elif isinstance(obj, h5py.Group):
+                _walk(obj, full)
+    _walk(h5_file)
+    return fallback
+
+
+def load_p10_chunks_directly(
+    one_h5_path: str,
+    chunk_dataset_path: str = "/entry/data/data",
+    cxi_dataset_path: str = "/entry_1/data_1/data",
+    max_frames: int = None,
+    verbose: bool = True,
+) -> np.ndarray:
+    """
+    BYPASS VDS — directly open each `*_data_NNNNNN.h5` chunk in the directory
+    and concatenate their contiguous data. Auto-discovers the actual dataset
+    path inside each chunk (P10 sometimes stores data at /entry/data/data,
+    sometimes at /entry/data/data_NNNNNN, depending on the acquisition mode).
+
+    Falls back to .cxi if no chunks are found.
+
+    Parameters
+    ----------
+    one_h5_path : str
+        Any file in the dataset's directory — chunk, master, or CXI.
+    chunk_dataset_path : str
+        HINT for the path inside each chunk. If None or the path doesn't
+        exist in a particular chunk, auto-discovers an appropriate one.
+    cxi_dataset_path : str
+        Path inside .cxi files (for the CXI fallback).
+    max_frames : int or None
+        Truncate to at most this many frames (centered).
+    verbose : bool
+
+    Returns
+    -------
+    volume : ndarray  shape (N_frames_total, H, W)  float32
+    """
+    import os, re, glob
+    try:
+        import h5py
+    except ImportError:
+        raise ImportError("h5py required. Install with: pip install h5py")
+
+    dirname = os.path.dirname(os.path.abspath(one_h5_path))
+    base = os.path.basename(one_h5_path)
+
+    # Derive the dataset stem
+    stem_match = re.match(
+        r'^(.+?)_(?:master|data_\d+)\.(?:h5|nxs|cxi)$',
+        base, flags=re.IGNORECASE,
+    )
+    if stem_match:
+        stem = stem_match.group(1)
+    else:
+        stem = re.sub(r'\.(h5|nxs|cxi)$', '', base, flags=re.IGNORECASE)
+
+    # Find all chunk files
+    chunk_pattern = os.path.join(dirname, f"{stem}_data_*.h5")
+    chunks = sorted(glob.glob(chunk_pattern))
+    if not chunks:
+        looser = os.path.join(dirname, f"{stem}*data_*.h5")
+        chunks = sorted(glob.glob(looser))
+    chunks = [c for c in chunks if not c.endswith("_master.h5")]
+
+    if verbose:
+        print(f"  Directory scan: stem='{stem}', found {len(chunks)} chunk file(s)")
+        for c in chunks[:5]:
+            print(f"    - {os.path.basename(c)}")
+        if len(chunks) > 5:
+            print(f"    ... ({len(chunks) - 5} more)")
+
+    if chunks:
+        # PASS 1: discover the actual path inside each chunk
+        chunk_paths = []   # list of (file_path, discovered_internal_path)
+        for c in chunks:
+            try:
+                with h5py.File(c, 'r') as f:
+                    p = _find_chunk_internal_data_path(f, chunk_dataset_path)
+                    if p is not None:
+                        chunk_paths.append((c, p))
+                        if verbose and len(chunk_paths) <= 3:
+                            print(f"    Found data in {os.path.basename(c)} "
+                                  f"at '{p}'")
+            except Exception as e:
+                if verbose:
+                    print(f"    Skipping {os.path.basename(c)}: {e}")
+                continue
+
+        if not chunk_paths:
+            raise IOError(
+                f"None of the {len(chunks)} chunk files contain accessible "
+                f"data. Inspect the file structure to find the correct path."
+            )
+
+        # PASS 2: determine reference shape from first chunk
+        with h5py.File(chunk_paths[0][0], 'r') as f:
+            ds = f[chunk_paths[0][1]]
+            ref_shape = ds.shape[1:] if len(ds.shape) >= 3 else ds.shape
+
+        # PASS 3: read each chunk and concatenate
+        salvaged_volumes = []
+        for c, p in chunk_paths:
+            try:
+                with h5py.File(c, 'r') as f:
+                    arr = f[p][...]
+                    if len(arr.shape) == 2:
+                        arr = arr[None, :, :]
+                    salvaged_volumes.append(arr.astype(np.float32))
+            except Exception as e:
+                if verbose:
+                    print(f"    Failed reading {os.path.basename(c)}: {e}")
+
+        if not salvaged_volumes:
+            raise IOError(
+                f"All chunk reads failed. Files exist but data is unreadable."
+            )
+
+        # Concatenate
+        try:
+            volume = np.concatenate(salvaged_volumes, axis=0)
+        except ValueError as e:
+            # Shapes don't match — pad to common size or fail loudly
+            shapes = [v.shape for v in salvaged_volumes]
+            raise IOError(
+                f"Chunk shapes are inconsistent: {shapes}\n"
+                f"Cannot concatenate. {e}"
+            )
+
+        if verbose:
+            print(f"  Successfully concatenated {volume.shape[0]} frames "
+                  f"from {len(chunk_paths)} chunk(s)")
+
+    else:
+        # No chunks found - try CXI file in same directory
+        cxi_candidates = sorted(glob.glob(os.path.join(dirname, f"{stem}*.cxi")))
+        if not cxi_candidates:
+            cxi_candidates = sorted(glob.glob(os.path.join(dirname, "*.cxi")))
+        if cxi_candidates:
+            cxi_path = cxi_candidates[0]
+            if verbose:
+                print(f"  No data chunks found. Falling back to CXI file: "
+                      f"{os.path.basename(cxi_path)}")
+            with h5py.File(cxi_path, 'r') as f:
+                p = _find_chunk_internal_data_path(f, cxi_dataset_path)
+                if p is None:
+                    raise IOError(
+                        f"CXI file {cxi_path} has no recognizable detector "
+                        f"dataset. Use 'Inspect HDF5 structure' to see what's "
+                        f"inside."
+                    )
+                volume = np.asarray(f[p][...], dtype=np.float32)
+                if verbose:
+                    print(f"  Loaded CXI data from '{p}': shape={volume.shape}")
+        else:
+            raise IOError(
+                f"No chunk files (*_data_*.h5) and no .cxi files found in "
+                f"{dirname}. Cannot reconstruct dataset.\n"
+                f"Looked for: {chunk_pattern}"
+            )
+
+    # Optional max_frames truncation
+    if max_frames is not None and volume.shape[0] > max_frames:
+        start = (volume.shape[0] - max_frames) // 2
+        volume = volume[start:start + max_frames]
+        if verbose:
+            print(f"  Truncated to {max_frames} central frames")
+
+    return volume
+
+
+def _preprocess_p10_volume(raw_volume: np.ndarray, target_size: int = 64,
+                            verbose: bool = True) -> np.ndarray:
+    """
+    Apply the same preprocessing as load_h5_diffraction's tail, but starting
+    from a raw frame stack (N_frames, H, W) — the output of
+    load_p10_chunks_directly. Used as the second half of the direct-chunk
+    fallback in p10_h5_to_npz.
+    """
+    volume = np.maximum(raw_volume.astype(np.float32), 0)
+    if verbose:
+        print(f"  Raw volume:    shape={volume.shape}  "
+              f"min={volume.min():.2e} max={volume.max():.2e}")
+
+    # Mask detector chip gaps
+    try:
+        volume = mask_detector_gaps(volume, detector='auto')
+    except Exception as e:
+        if verbose:
+            print(f"  Detector gap masking skipped: {e}")
+
+    # Remove hot pixels
+    try:
+        volume = remove_hot_pixels(volume)
+    except Exception as e:
+        if verbose:
+            print(f"  Hot pixel removal skipped: {e}")
+
+    # Remove beamstop streaks (only on detector axes)
+    try:
+        volume = remove_beamstop_streaks(volume)
+    except Exception as e:
+        if verbose:
+            print(f"  Beamstop streak removal skipped: {e}")
+
+    # Find Bragg peak via the robust box-finder
+    try:
+        peak_idx = find_bragg_peak_box(volume)
+    except Exception:
+        peak_idx = tuple(s // 2 for s in volume.shape)
+
+    # Crop a target_size cube around the peak
+    volume = crop_around_peak(volume, peak_idx, target_size)
+
+    if verbose:
+        print(f"  Cropped:       shape={volume.shape}  "
+              f"peak at {peak_idx}, max={volume.max():.2e}")
+    return volume
+
+
+def p10_h5_to_npz(
+    h5_path: str,
+    npz_path: str,
+    fio_path: str = None,
+    target_size: int = 64,
+    dataset_path: str = None,
+    verbose: bool = True,
+    force_direct_chunks: bool = False,
+):
+    """
+    Load a P10 (PETRA III / DESY) BCDI scan and save as a .npz that
+    CDI-ST reconstruction can use directly.
+
+    Robust to several P10 quirks:
+      1. Single chunk file with broken VDS placeholders → reads its own data
+      2. Master file referencing missing chunks → falls back to direct-chunk
+         enumeration (no VDS involvement)
+      3. CXI (.cxi) files in the directory → used as fallback if no chunks
+
+    Parameters
+    ----------
+    h5_path : str
+        Any P10 file: master, data chunk, or .cxi.
+    npz_path : str
+        Output .npz filename.
+    fio_path : str or None
+        Optional .fio metadata path (motor positions). Auto-found if None.
+    target_size : int
+        Output cube size (target_size³).
+    dataset_path : str or None
+        Explicit HDF5 path to detector data. Auto-detected if None.
+    verbose : bool
+    force_direct_chunks : bool
+        If True, skip the master/VDS attempt and go straight to enumerating
+        chunk files in the directory. Use when you know the master is broken.
+    """
+    import os
+
+    diffraction = None
+    primary_error = None
+
+    # ── Strategy 1: master/VDS read via load_h5_diffraction ──────────
+    if not force_direct_chunks:
+        try:
+            diffraction = load_h5_diffraction(
+                h5_path, dataset_path=dataset_path,
+                target_size=target_size, verbose=verbose,
+            )
+        except Exception as e:
+            primary_error = e
+            if verbose:
+                print(f"\n  Master/VDS read failed: {e}")
+                print(f"  Trying direct chunk enumeration as fallback...\n")
+
+    # ── Strategy 2: direct chunk enumeration (bypass VDS) ────────────
+    if diffraction is None:
+        try:
+            # IMPORTANT: do NOT pass the user's dataset_path to the chunk
+            # reader if it's a VDS-like path (e.g. '/entry/data/data_000002').
+            # The fallback is meant to bypass VDS entirely — so we read
+            # each chunk's OWN data at the canonical chunk-internal location.
+            import re
+            user_path_is_vds_like = (dataset_path is not None and
+                bool(re.search(r'data_\d+\s*$', dataset_path)))
+            if user_path_is_vds_like:
+                chunk_path = "/entry/data/data"
+                if verbose:
+                    print(f"  Note: '{dataset_path}' is the broken VDS — "
+                          f"chunk fallback will read '/entry/data/data' "
+                          f"from each chunk instead.")
+            else:
+                chunk_path = dataset_path or "/entry/data/data"
+            raw_volume = load_p10_chunks_directly(
+                h5_path,
+                chunk_dataset_path=chunk_path,
+                max_frames=None,
+                verbose=verbose,
+            )
+            # Now run the same preprocessing pipeline that load_h5_diffraction
+            # would have applied to the bulk-read array
+            diffraction = _preprocess_p10_volume(
+                raw_volume, target_size=target_size, verbose=verbose,
+            )
+        except Exception as e2:
+            # Both strategies failed - raise the most informative error
+            if primary_error is not None:
+                raise IOError(
+                    f"Failed to load P10 data via both methods:\n\n"
+                    f"  Master/VDS read:\n    {primary_error}\n\n"
+                    f"  Direct chunk read:\n    {e2}\n\n"
+                    f"Possible solutions:\n"
+                    f"  - Make sure ALL chunk files are in the same directory\n"
+                    f"  - Use 'Inspect HDF5 structure' to see what's inside\n"
+                    f"  - Try opening a single _data_NNNNNN.h5 chunk file\n"
+                    f"  - If you have a .cxi file, use it instead"
+                ) from e2
+            else:
+                raise
+
+    # ── .fio metadata parsing ────────────────────────────────────────
+    fio_data = None
+    if fio_path is None:
+        # Look for sibling .fio file with the same stem as the master
+        base = os.path.basename(h5_path)
+        dirname = os.path.dirname(os.path.abspath(h5_path))
+        import re
+        stem = re.sub(r'_(master|data_\d+)\.h5$', '', base, flags=re.IGNORECASE)
+        stem = re.sub(r'\.h5$', '', stem)
+        for cand in [
+            os.path.join(dirname, stem + ".fio"),
+            os.path.join(dirname, base.replace(".h5", ".fio")),
+            os.path.join(dirname, "..", stem + ".fio"),
+        ]:
+            if os.path.exists(cand):
+                fio_path = cand
+                break
+    if fio_path is not None and os.path.exists(fio_path):
+        if verbose:
+            print(f"  Reading metadata: {fio_path}")
+        fio_data = parse_p10_fio(fio_path)
+        if verbose and fio_data.get("scan_command"):
+            print(f"  Scan: {fio_data['scan_command']}")
+
+    # Save .npz
+    save_dict = {
+        "diffraction": diffraction.astype(np.float32),
+        "source_file": str(h5_path),
+        "beamline": "P10",
+    }
+    if fio_data is not None:
+        save_dict["scan_command"] = fio_data.get("scan_command", "")
+        # Common P10 motors that BCDI cares about
+        for motor in ["omega", "chi", "phi", "theta", "tth", "eta", "mu",
+                      "del", "delta", "gamma", "nu", "energy"]:
+            if motor in fio_data["data"]:
+                arr = fio_data["data"][motor]
+                save_dict[f"motor_{motor}"] = np.asarray(arr, dtype=np.float32)
+            elif motor in fio_data["params"]:
+                save_dict[f"motor_{motor}_static"] = float(fio_data["params"][motor])
+    np.savez_compressed(npz_path, **save_dict)
+    if verbose:
+        print(f"  Saved {npz_path}  "
+              f"shape={diffraction.shape}  max={diffraction.max():.2e}")
+
+    return {
+        "diffraction": diffraction,
+        "voxel_size_nm": None,
+        "source_file": h5_path,
+        "fio": fio_data,
+    }
 
 
 def spec_edf_to_npz(

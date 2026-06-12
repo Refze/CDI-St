@@ -63,12 +63,22 @@ class TrainingWorker(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
     epoch_done = pyqtSignal(int, float, float)  # epoch, train_loss, val_loss
+    running_loss = pyqtSignal(float, float)  # (fractional_epoch, running_train_loss)
     finished = pyqtSignal(str)  # model path
     failed = pyqtSignal(str)
 
     def __init__(self, params):
         super().__init__()
         self.p = params
+        self._should_stop = False
+
+    def request_stop(self):
+        """Cooperative stop: training loop checks this flag and exits gracefully.
+
+        Safer than QThread.terminate(), which kills the thread mid-operation
+        and corrupts CUDA context / PyTorch autograd state.
+        """
+        self._should_stop = True
 
     def _apply_noise(self, measured, p):
         """Apply on-the-fly experimental noise to a batch of measured magnitudes."""
@@ -181,10 +191,18 @@ class TrainingWorker(QThread):
             last_emit = _time.time()
 
             for epoch in range(start_epoch, p['epochs']):
+                if self._should_stop:
+                    self.log.emit(
+                        f"Stop requested. Saving checkpoint at end of epoch "
+                        f"{epoch}/{p['epochs']}..."
+                    )
+                    break
                 model.train()
                 t0 = time.time()
                 train_total = 0; train_n = 0
                 for batch_idx, batch in enumerate(train_loader):
+                    if self._should_stop:
+                        break
                     inp = batch['input'].to(device)
                     measured = batch['measured'].to(device)
 
@@ -219,11 +237,13 @@ class TrainingWorker(QThread):
                         self.progress.emit(min(pct, 99))
                         # Also a brief log line every few seconds so user
                         # sees the trainer is alive even mid-epoch.
-                        running_loss = train_total / max(train_n, 1)
+                        running_loss_val = train_total / max(train_n, 1)
+                        frac_ep = epoch + (batch_idx + 1) / n_train_batches
+                        self.running_loss.emit(frac_ep, running_loss_val)
                         self.log.emit(
                             f"  Ep {epoch+1}/{p['epochs']}  "
                             f"batch {batch_idx+1}/{n_train_batches}  "
-                            f"loss={running_loss:.5f}"
+                            f"loss={running_loss_val:.5f}"
                         )
                         last_emit = now
 
@@ -297,12 +317,18 @@ class SupervisedTrainingWorker(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
     epoch_done = pyqtSignal(int, float, float)
+    running_loss = pyqtSignal(float, float)  # (fractional_epoch, running_train_loss)
     finished = pyqtSignal(str)
     failed = pyqtSignal(str)
 
     def __init__(self, params):
         super().__init__()
         self.p = params
+        self._should_stop = False
+
+    def request_stop(self):
+        """Cooperative stop — training loop checks this and exits cleanly."""
+        self._should_stop = True
 
     def run(self):
         try:
@@ -362,11 +388,16 @@ class SupervisedTrainingWorker(QThread):
             self.log.emit(f"Train: {n_train}  Val: {n_val}  Batch: {p['batch_size']}")
 
             # Model + loss
+            # NOTE: BCDIPhaseLoss uses the original (alpha/beta/gamma)
+            # keyword names. We deliberately do NOT use the descriptive
+            # names (alpha_amp/beta_phase/gamma_diff) here, so this GUI
+            # works with ANY version of nn_phase_model.py without requiring
+            # the user to update both files in lockstep.
             model = PhaseUNet3D(in_channels=1, base_channels=p['base_channels']).to(device)
             loss_fn = BCDIPhaseLoss(
-                alpha_amp=p.get('alpha_amp', 1.0),
-                beta_phase=p.get('beta_phase', 1.0),
-                gamma_diff=p.get('gamma_diff', 0.5),
+                alpha=p.get('alpha_amp', p.get('alpha', 1.0)),
+                beta=p.get('beta_phase', p.get('beta', 1.0)),
+                gamma=p.get('gamma_diff', p.get('gamma', 0.5)),
             )
             n_params = count_parameters(model)
             self.log.emit(f"PhaseUNet3D: {n_params:,} parameters, base_ch={p['base_channels']}")
@@ -399,11 +430,19 @@ class SupervisedTrainingWorker(QThread):
             last_emit = _time.time()
 
             for epoch in range(start_epoch, p['epochs']):
+                if self._should_stop:
+                    self.log.emit(
+                        f"Stop requested. Saving checkpoint at end of epoch "
+                        f"{epoch}/{p['epochs']}..."
+                    )
+                    break
                 model.train()
                 t0 = time.time()
                 train_total = 0; train_n = 0
 
                 for batch_idx, batch in enumerate(train_loader):
+                    if self._should_stop:
+                        break
                     inp = batch['input'].to(device)
                     phase_true = batch['phase_true'].to(device)
                     support = batch['support'].to(device)
@@ -416,7 +455,7 @@ class SupervisedTrainingWorker(QThread):
                             phase_pred=phase_pred,
                             phase_true=phase_true,
                             support=support,
-                            diff_amp=diff_amp,
+                            amplitude=diff_amp,
                         )
                     scaler.scale(losses['total']).backward()
                     scaler.unscale_(optimizer)
@@ -432,6 +471,9 @@ class SupervisedTrainingWorker(QThread):
                         pct = int(100 * iter_count / max(total_iters, 1))
                         self.progress.emit(min(pct, 99))
                         running_loss = train_total / max(train_n, 1)
+                        # Fractional epoch for x-axis of live curve
+                        frac_ep = epoch + (batch_idx + 1) / n_train_batches
+                        self.running_loss.emit(frac_ep, running_loss)
                         self.log.emit(
                             f"  Ep {epoch+1}/{p['epochs']}  "
                             f"batch {batch_idx+1}/{n_train_batches}  "
@@ -454,7 +496,7 @@ class SupervisedTrainingWorker(QThread):
                                 phase_pred=phase_pred,
                                 phase_true=phase_true,
                                 support=support,
-                                diff_amp=diff_amp,
+                                amplitude=diff_amp,
                             )
                         val_total += losses['total'].item()
                         val_n += 1
@@ -1409,20 +1451,51 @@ class T4(QWidget):
         self._worker.log.connect(self.log.appendPlainText)
         self._worker.progress.connect(self.pg.setValue)
         self._worker.epoch_done.connect(self._on_epoch)
+        self._worker.running_loss.connect(self._on_running_loss)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def _stop_training(self):
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self.log.appendPlainText("Training terminated by user.")
+            # Cooperative stop: ask the worker to break out of the training
+            # loop at the next batch boundary. The worker will save its
+            # checkpoint and emit 'finished' cleanly.
+            #
+            # Do NOT call self._worker.terminate() — that kills the thread
+            # mid-batch and corrupts CUDA / autograd state, crashing the GUI.
+            self._worker.request_stop()
+            self.log.appendPlainText(
+                "Stop requested. Worker will finish current batch and save "
+                "a checkpoint. This may take a few seconds..."
+            )
+            self.stop_btn.setEnabled(False)
+            # train_btn re-enabled by _on_finished / _on_failed
+            return
+        # If worker isn't running, just reset buttons
         self.train_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
     def _on_epoch(self, epoch, train_loss, val_loss):
+        """Called when a full epoch finishes — append the official point."""
         self._train_losses.append(train_loss)
         self._val_losses.append(val_loss)
+        # Live points are now superseded by the official epoch point
+        self._live_x = []
+        self._live_y = []
+        self._draw_curve()
+
+    def _on_running_loss(self, fractional_epoch, loss):
+        """Live mid-epoch loss point for users to see something is happening."""
+        if not hasattr(self, '_live_x'):
+            self._live_x = []
+            self._live_y = []
+        self._live_x.append(fractional_epoch)
+        self._live_y.append(loss)
+        # Keep only the last 200 points so we don't slow down rendering
+        if len(self._live_x) > 200:
+            self._live_x = self._live_x[-200:]
+            self._live_y = self._live_y[-200:]
         self._draw_curve()
 
     def _draw_curve(self):
@@ -1430,13 +1503,31 @@ class T4(QWidget):
             self.fig_curve.clear()
             ax = self.fig_curve.add_subplot(111)
             ax.set_facecolor('#000005')
-            epochs = range(1, len(self._train_losses) + 1)
-            ax.semilogy(epochs, self._train_losses, color='#3fb950', linewidth=2, label='Train')
-            ax.semilogy(epochs, self._val_losses, color='#f0883e', linewidth=2, label='Val')
+            # Choose log vs linear: log breaks when there's a single point or
+            # when losses cover < 1 decade; linear is safer for early epochs
+            n_epochs = len(self._train_losses)
+            use_log = n_epochs >= 3 and max(self._train_losses) / max(
+                min(self._train_losses), 1e-12) > 3.0
+            plot = ax.semilogy if use_log else ax.plot
+
+            # Live curve (mid-epoch running loss) — light, dashed, behind
+            if hasattr(self, '_live_x') and self._live_x:
+                plot(self._live_x, self._live_y, color='#3fb950',
+                     linewidth=1, alpha=0.45, linestyle='--', label='Running')
+
+            # Per-epoch curves
+            if n_epochs > 0:
+                epochs = list(range(1, n_epochs + 1))
+                plot(epochs, self._train_losses, color='#3fb950',
+                     linewidth=2, marker='o', markersize=4, label='Train')
+                plot(epochs, self._val_losses, color='#f0883e',
+                     linewidth=2, marker='s', markersize=4, label='Val')
+
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Loss')
             ax.set_title('Training curve', fontsize=10)
-            ax.legend(fontsize=8)
+            if (hasattr(self, '_live_x') and self._live_x) or n_epochs > 0:
+                ax.legend(fontsize=8, loc='upper right')
             ax.grid(True, alpha=0.2)
         self.canvas_curve.draw()
 
@@ -1740,20 +1831,41 @@ class T4_Sup(QWidget):
         self._worker.log.connect(self.log.appendPlainText)
         self._worker.progress.connect(self.pg.setValue)
         self._worker.epoch_done.connect(self._on_epoch)
+        self._worker.running_loss.connect(self._on_running_loss)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def _stop_training(self):
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self.log.appendPlainText("Training terminated by user.")
+            # Cooperative stop — see comment in T4_Sup._stop_training
+            self._worker.request_stop()
+            self.log.appendPlainText(
+                "Stop requested. Worker will finish current batch and save "
+                "a checkpoint. This may take a few seconds..."
+            )
+            self.stop_btn.setEnabled(False)
+            return
         self.train_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
     def _on_epoch(self, epoch, train_loss, val_loss):
         self._train_losses.append(train_loss)
         self._val_losses.append(val_loss)
+        self._live_x = []
+        self._live_y = []
+        self._draw_curve()
+
+    def _on_running_loss(self, fractional_epoch, loss):
+        """Live mid-epoch loss point."""
+        if not hasattr(self, '_live_x'):
+            self._live_x = []
+            self._live_y = []
+        self._live_x.append(fractional_epoch)
+        self._live_y.append(loss)
+        if len(self._live_x) > 200:
+            self._live_x = self._live_x[-200:]
+            self._live_y = self._live_y[-200:]
         self._draw_curve()
 
     def _draw_curve(self):
@@ -1761,13 +1873,27 @@ class T4_Sup(QWidget):
             self.fig_curve.clear()
             ax = self.fig_curve.add_subplot(111)
             ax.set_facecolor('#000005')
-            epochs = range(1, len(self._train_losses) + 1)
-            ax.semilogy(epochs, self._train_losses, color='#3fb950', linewidth=2, label='Train')
-            ax.semilogy(epochs, self._val_losses, color='#bf8700', linewidth=2, label='Val')
+            n_epochs = len(self._train_losses)
+            use_log = n_epochs >= 3 and max(self._train_losses) / max(
+                min(self._train_losses), 1e-12) > 3.0
+            plot = ax.semilogy if use_log else ax.plot
+
+            if hasattr(self, '_live_x') and self._live_x:
+                plot(self._live_x, self._live_y, color='#3fb950',
+                     linewidth=1, alpha=0.45, linestyle='--', label='Running')
+
+            if n_epochs > 0:
+                epochs = list(range(1, n_epochs + 1))
+                plot(epochs, self._train_losses, color='#3fb950',
+                     linewidth=2, marker='o', markersize=4, label='Train')
+                plot(epochs, self._val_losses, color='#bf8700',
+                     linewidth=2, marker='s', markersize=4, label='Val')
+
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Loss')
-            ax.set_title('Supervised training curve', fontsize=10)
-            ax.legend(fontsize=8)
+            ax.set_title('Unsupervised training curve', fontsize=10)
+            if (hasattr(self, '_live_x') and self._live_x) or n_epochs > 0:
+                ax.legend(fontsize=8, loc='upper right')
             ax.grid(True, alpha=0.2)
         self.canvas_curve.draw()
 
@@ -1837,9 +1963,20 @@ class T5(QWidget):
         )
         spec_btn.clicked.connect(self._convert_spec_edf)
         ib_row.addWidget(spec_btn)
+        p10_btn = QPushButton("P10 .h5…")
+        p10_btn.setStyleSheet("background:#bf8700;padding:5px 8px;min-height:20px;font-size:9pt")
+        p10_btn.setMaximumWidth(75)
+        p10_btn.setToolTip(
+            "Convert PETRA III P10 (DESY) data to .npz.\n"
+            "Pick either the _master.h5 file or any _data_NNNNNN.h5 chunk —\n"
+            "the loader auto-finds the master and reads the linked frames.\n"
+            "Reads motor positions from the .fio metadata file if present."
+        )
+        p10_btn.clicked.connect(self._convert_p10_h5)
+        ib_row.addWidget(p10_btn)
         ib_widget = QWidget()
         ib_widget.setLayout(ib_row)
-        ib_widget.setMaximumWidth(170)
+        ib_widget.setMaximumWidth(245)
         tg.addWidget(ib_widget, 0, 2)
 
         tg.addWidget(QLabel("Model:"), 1, 0, Qt.AlignmentFlag.AlignRight)
@@ -1994,6 +2131,216 @@ class T5(QWidget):
         )
         if f:
             self.input_path.setText(f)
+
+    def _convert_p10_h5(self):
+        """Convert PETRA III P10 .h5 (master or data chunk) + .fio → .npz."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Convert P10 .h5 + .fio to .npz")
+        dlg.setMinimumWidth(560)
+        layout = QVBoxLayout(dlg)
+
+        intro = QLabel(
+            "<b>PETRA III P10 (DESY) BCDI data conversion</b><br>"
+            "<span style='color:#8b949e;font-size:9pt'>"
+            "Pick either the <tt>_master.h5</tt> file or any "
+            "<tt>_data_NNNNNN.h5</tt> chunk — the loader auto-finds the "
+            "master. The companion <tt>.fio</tt> metadata file (motor "
+            "positions, scan command) is detected automatically if it "
+            "lives in the same directory.</span>"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # H5 path
+        h5_row = QHBoxLayout()
+        h5_le = QLineEdit()
+        h5_le.setPlaceholderText("…/align_03_01698_master.h5  (or any data_*.h5)")
+        h5_row.addWidget(h5_le, 1)
+        h5_browse = QPushButton("…"); h5_browse.setMaximumWidth(30)
+        def _pick_h5():
+            f, _ = QFileDialog.getOpenFileName(
+                self, "Pick P10 .h5 file (master or data chunk)",
+                "", "HDF5 (*.h5 *.nxs)"
+            )
+            if f:
+                h5_le.setText(f)
+                # Try to auto-find the .fio sibling
+                self._autodetect_p10_fio(f, fio_le)
+        h5_browse.clicked.connect(_pick_h5)
+        h5_row.addWidget(h5_browse)
+        h5_w = QWidget(); h5_w.setLayout(h5_row)
+        form.addRow("HDF5 file:", h5_w)
+
+        # FIO path (optional)
+        fio_row = QHBoxLayout()
+        fio_le = QLineEdit()
+        fio_le.setPlaceholderText("(optional) …/align_03_01698.fio")
+        fio_le.setToolTip(
+            "Optional .fio metadata file with motor positions and scan command.\n"
+            "If left empty, CDI-ST looks for a sibling .fio file with the\n"
+            "same name stem as the master."
+        )
+        fio_row.addWidget(fio_le, 1)
+        fio_browse = QPushButton("…"); fio_browse.setMaximumWidth(30)
+        def _pick_fio():
+            f, _ = QFileDialog.getOpenFileName(
+                self, "Pick .fio metadata file (optional)",
+                "", "FIO (*.fio);;All (*)"
+            )
+            if f:
+                fio_le.setText(f)
+        fio_browse.clicked.connect(_pick_fio)
+        fio_row.addWidget(fio_browse)
+        fio_w = QWidget(); fio_w.setLayout(fio_row)
+        form.addRow("Metadata (.fio):", fio_w)
+
+        # Inspect button — show the HDF5 structure to help debug
+        inspect_btn = QPushButton("Inspect HDF5 structure…")
+        inspect_btn.setStyleSheet("background:#30363d;padding:5px 10px;min-height:20px;font-size:9pt")
+        inspect_btn.setToolTip(
+            "Print the dataset tree of the chosen file so you can see\n"
+            "where the detector data lives. Useful when auto-detection fails."
+        )
+        def _do_inspect():
+            p = h5_le.text().strip()
+            if not p or not os.path.exists(p):
+                QMessageBox.warning(self, "No file", "Pick the .h5 file first.")
+                return
+            try:
+                import io as _io, contextlib as _cl
+                from cdi_st.nn_experimental_loader import inspect_h5, _find_p10_master
+                buf = _io.StringIO()
+                master = _find_p10_master(p) or p
+                with _cl.redirect_stdout(buf):
+                    inspect_h5(master)
+                text = buf.getvalue()
+            except Exception as e:
+                text = f"Error reading {p}:\n{e}"
+            tree_dlg = QDialog(dlg)
+            tree_dlg.setWindowTitle("HDF5 structure")
+            tree_dlg.resize(720, 460)
+            tv = QVBoxLayout(tree_dlg)
+            txt = QPlainTextEdit(text); txt.setReadOnly(True)
+            txt.setStyleSheet("font-family:Consolas, monospace; font-size:9pt;")
+            tv.addWidget(txt)
+            close = QPushButton("Close"); close.clicked.connect(tree_dlg.accept)
+            tv.addWidget(close)
+            tree_dlg.exec()
+        inspect_btn.clicked.connect(_do_inspect)
+        form.addRow("", inspect_btn)
+
+        # Optional explicit dataset path
+        ds_le = QLineEdit()
+        ds_le.setPlaceholderText("(optional) e.g. /entry/data/data")
+        ds_le.setToolTip(
+            "Explicit HDF5 path to the detector data, if auto-detect fails.\n"
+            "Use 'Inspect HDF5 structure' first to see what's available."
+        )
+        form.addRow("Dataset path:", ds_le)
+
+        # Target size
+        size_spin = QSpinBox()
+        size_spin.setRange(32, 256); size_spin.setValue(64); size_spin.setSingleStep(16)
+        size_spin.setToolTip("Cropped output grid: target_size³ centered on the Bragg peak.")
+        form.addRow("Target size:", size_spin)
+
+        # Output file
+        out_row = QHBoxLayout()
+        out_le = QLineEdit()
+        out_le.setPlaceholderText("e.g. p10_recon_input.npz")
+        out_row.addWidget(out_le, 1)
+        out_browse = QPushButton("…"); out_browse.setMaximumWidth(30)
+        def _pick_out():
+            f, _ = QFileDialog.getSaveFileName(self, "Save .npz", "p10_scan.npz", "NumPy (*.npz)")
+            if f: out_le.setText(f)
+        out_browse.clicked.connect(_pick_out)
+        out_row.addWidget(out_browse)
+        out_w = QWidget(); out_w.setLayout(out_row)
+        form.addRow("Output file (.npz):", out_w)
+
+        layout.addLayout(form)
+
+        status = QLabel("")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+
+        btn_row = QHBoxLayout(); btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel"); cancel_btn.clicked.connect(dlg.reject); btn_row.addWidget(cancel_btn)
+        convert_btn = QPushButton("Convert")
+        convert_btn.setStyleSheet("background:#1f6feb;padding:6px 16px;font-weight:600")
+        btn_row.addWidget(convert_btn)
+        layout.addLayout(btn_row)
+
+        def _do_convert():
+            h5_path = h5_le.text().strip()
+            out_path = out_le.text().strip()
+            if not h5_path or not out_path:
+                status.setText("<span style='color:#da3633'>HDF5 file and output file are required.</span>")
+                return
+            if not os.path.exists(h5_path):
+                status.setText(f"<span style='color:#da3633'>HDF5 file not found: {h5_path}</span>")
+                return
+            convert_btn.setEnabled(False)
+            status.setText("Converting…")
+            QApplication.processEvents()
+            try:
+                from cdi_st.nn_experimental_loader import p10_h5_to_npz
+                ds_path = ds_le.text().strip() or None
+                fio_path = fio_le.text().strip() or None
+                result = p10_h5_to_npz(
+                    h5_path=h5_path,
+                    npz_path=out_path,
+                    fio_path=fio_path,
+                    target_size=size_spin.value(),
+                    dataset_path=ds_path,
+                    verbose=True,
+                )
+                shape = result['diffraction'].shape
+                peak = result['diffraction'].max()
+                fio_msg = ""
+                if result.get('fio') and result['fio'].get('scan_command'):
+                    fio_msg = f"<br>Scan: {result['fio']['scan_command'][:80]}"
+                status.setText(
+                    f"<span style='color:#3fb950'>\u2713 Saved {out_path}</span>"
+                    f"<br><span style='color:#8b949e;font-size:9pt'>"
+                    f"Volume: {shape[0]}\u00b3, peak max={peak:.1e}{fio_msg}</span>"
+                )
+                self.input_path.setText(out_path)
+                cancel_btn.setText("Close")
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(tb)
+                status.setText(
+                    f"<span style='color:#da3633'>\u2717 Conversion failed:</span><br>"
+                    f"<span style='font-size:9pt'>{str(e)[:300]}</span>"
+                )
+            finally:
+                convert_btn.setEnabled(True)
+
+        convert_btn.clicked.connect(_do_convert)
+        dlg.exec()
+
+    def _autodetect_p10_fio(self, h5_path: str, fio_line_edit):
+        """Try to find a sibling .fio file when an .h5 is picked."""
+        import os, re
+        if not h5_path:
+            return
+        base = os.path.basename(h5_path)
+        dirname = os.path.dirname(os.path.abspath(h5_path))
+        stem = re.sub(r'_(master|data_\d+)\.h5$', '', base, flags=re.IGNORECASE)
+        stem = re.sub(r'\.h5$', '', stem)
+        for cand in [
+            os.path.join(dirname, stem + ".fio"),
+            os.path.join(dirname, base.replace(".h5", ".fio")),
+            os.path.join(dirname, "..", stem + ".fio"),
+        ]:
+            if os.path.exists(cand):
+                fio_line_edit.setText(os.path.abspath(cand))
+                return
 
     def _convert_spec_edf(self):
         """Open dialog to convert ID01 SPEC+EDF data into a reconstruction-ready .npz."""
