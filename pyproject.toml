@@ -3,8 +3,8 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cdi-stools"
-version = "0.2.0"
+name = "cdi-st"
+version = "0.2.1"
 description = "Coherent Diffraction Imaging Simulation Tools — BCDI simulation and NN-based phase retrieval"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -35,8 +35,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-	"Programming Language :: Python :: 3.13",
-	"Programming Language :: Python :: 3.14",
     "Environment :: X11 Applications :: Qt",
 ]
 
@@ -49,6 +47,7 @@ dependencies = [
     "PyQt6-WebEngine>=6.4",
     "torch>=2.0",
     "h5py>=3.7",
+    "hdf5plugin>=4.0",
     "scikit-image>=0.20",
     "diffpy.structure>=3.1",
     "plotly>=5.13",
@@ -76,16 +75,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Refze/CDI-St"
-Documentation = "https://github.com/Refze/CDI-St#readme"
-Repository = "https://github.com/Refze/CDI-St"
-Issues = "https://github.com/Refze/CDI-St/issues"
-Changelog = "https://github.com/Refze/CDI-St/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/SAIDIsoufiane/CDI-St"
+Documentation = "https://github.com/SAIDIsoufiane/CDI-St#readme"
+Repository = "https://github.com/SAIDIsoufiane/CDI-St"
+Issues = "https://github.com/SAIDIsoufiane/CDI-St/issues"
+Changelog = "https://github.com/SAIDIsoufiane/CDI-St/blob/main/CHANGELOG.md"
 
 # Console command: typing `cdi-st` in the terminal launches the GUI
 [project.scripts]
 cdi-st = "cdi_st.bcdi_gui:main"
-cdi-stools = "cdi_st.bcdi_gui:main"
 
 # ── Hatchling build configuration ───────────────────────────────────────────
 # Tell Hatchling where the source lives and which non-Python files to include.
@@ -110,16 +108,12 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
+# Pragmatic linting — most existing code already breaks heavy strict mode
 select = ["E", "F", "W", "I", "UP"]
 ignore = [
-    "E501",   # line too long
-    "E402",   # module-level import not at top
+    "E501",   # line too long — many scientific lines exceed 100
+    "E402",   # module-level import not at top — common with conditional Qt imports
     "E731",   # don't assign a lambda
-    "E702",   # multiple statements on one line (semicolon) — used heavily in this codebase
-    "F841",   # local variable assigned but never used — common with placeholder im0/im1
-    "E741",   # ambiguous variable name (l, I, O)
-    "W291",   # trailing whitespace
-    "W293",   # whitespace on blank line
 ]
 
 [tool.pytest.ini_options]

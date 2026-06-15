@@ -2241,6 +2241,117 @@ class T5(QWidget):
         )
         form.addRow("Dataset path:", ds_le)
 
+        # ─── NEW in 0.2.1: scan probe + frame range + detector ROI ────────
+        # For long Eiger scans (e.g. 381 chunks × 10 frames at 2167×2070), loading
+        # everything would require ~50 GB of RAM. Let the user preview the scan,
+        # then pick a frame subrange and/or detector ROI to keep memory sane.
+
+        # "Probe scan" — read all chunk metadata to populate frame counts.
+        probe_btn = QPushButton("Probe scan (read metadata only)…")
+        probe_btn.setStyleSheet("background:#30363d;padding:5px 10px;min-height:20px;font-size:9pt")
+        probe_btn.setToolTip(
+            "Open the master file and enumerate its chunk files (no data\n"
+            "is decompressed — this is essentially instant). Populates the\n"
+            "Frame range and shows an estimated memory footprint."
+        )
+
+        # Scan info label
+        info_lbl = QLabel(
+            "<span style='color:#8b949e;font-size:9pt'>"
+            "Click 'Probe scan' to see total frame count and memory needed."
+            "</span>"
+        )
+        info_lbl.setWordWrap(True)
+
+        # Frame range
+        fr_row = QHBoxLayout()
+        fr_start = QSpinBox(); fr_start.setRange(0, 999999); fr_start.setValue(0)
+        fr_start.setToolTip("First frame index (inclusive) to load. 0 = beginning of scan.")
+        fr_stop = QSpinBox(); fr_stop.setRange(0, 999999); fr_stop.setValue(0)
+        fr_stop.setSpecialValueText("(end)")
+        fr_stop.setToolTip(
+            "Last frame index (exclusive) to load. 0 means 'all frames'.\n"
+            "For BCDI rocking curves you typically want only ~100-300 frames\n"
+            "around the maximum of the rocking curve."
+        )
+        fr_row.addWidget(QLabel("from")); fr_row.addWidget(fr_start)
+        fr_row.addWidget(QLabel("to")); fr_row.addWidget(fr_stop)
+        fr_row.addStretch(1)
+        fr_w = QWidget(); fr_w.setLayout(fr_row)
+
+        # Detector ROI (full / centered)
+        roi_row = QHBoxLayout()
+        roi_check = QCheckBox("Enable")
+        roi_check.setToolTip(
+            "Read only a region of interest from each detector frame.\n"
+            "Reduces memory and disk by (full / ROI²)×. For BCDI you usually\n"
+            "only need ~256×256 around the Bragg peak."
+        )
+        roi_size = QSpinBox(); roi_size.setRange(32, 4096)
+        roi_size.setValue(256); roi_size.setSingleStep(32); roi_size.setSuffix(" px")
+        roi_size.setToolTip("Square ROI side length, centered on detector center.")
+        roi_size.setEnabled(False)
+        roi_check.toggled.connect(roi_size.setEnabled)
+        roi_row.addWidget(roi_check)
+        roi_row.addWidget(QLabel("size:"))
+        roi_row.addWidget(roi_size)
+        roi_row.addStretch(1)
+        roi_w = QWidget(); roi_w.setLayout(roi_row)
+
+        # Memory budget
+        mem_spin = QDoubleSpinBox()
+        mem_spin.setRange(0.5, 256.0); mem_spin.setValue(8.0); mem_spin.setSingleStep(1.0)
+        mem_spin.setSuffix(" GB")
+        mem_spin.setToolTip(
+            "Maximum RAM the loader is allowed to use. If the requested read\n"
+            "would exceed this, the loader refuses and tells you to shrink the\n"
+            "frame range or detector ROI — rather than crashing Python with\n"
+            "an out-of-memory error."
+        )
+
+        # State variable that gets set by Probe scan
+        scan_state = {'info': None}
+
+        def _do_probe():
+            p = h5_le.text().strip()
+            if not p or not os.path.exists(p):
+                QMessageBox.warning(self, "No file", "Pick the .h5 file first.")
+                return
+            try:
+                from cdi_st.nn_experimental_loader import p10_scan_info
+                info = p10_scan_info(p)
+                scan_state['info'] = info
+                # Wire up the spinboxes to the actual frame count
+                fr_start.setRange(0, max(info['n_frames'] - 1, 0))
+                fr_stop.setRange(0, info['n_frames'])
+                fr_stop.setValue(info['n_frames'])   # default: read all
+                roi_size.setMaximum(min(info['frame_h'], info['frame_w']))
+                # Display
+                miss = (f", <span style='color:#da3633'>{info['n_missing']} MISSING</span>"
+                        if info['n_missing'] else "")
+                info_lbl.setText(
+                    f"<span style='color:#3fb950;font-size:9pt'>"
+                    f"Scan: <b>{info['n_frames']}</b> frames × "
+                    f"<b>{info['frame_h']}×{info['frame_w']}</b> "
+                    f"(<tt>{info['dtype']}</tt>) "
+                    f"across {info['n_chunks']} chunk(s){miss}"
+                    f"<br>Full read needs <b>{info['size_full_gb']:.2f} GB</b> "
+                    f"as float32. Set Frame range and/or Detector ROI "
+                    f"to load a subset."
+                    f"</span>"
+                )
+            except Exception as e:
+                info_lbl.setText(
+                    f"<span style='color:#da3633'>Probe failed: {e}</span>"
+                )
+
+        probe_btn.clicked.connect(_do_probe)
+        form.addRow("", probe_btn)
+        form.addRow("", info_lbl)
+        form.addRow("Frame range:", fr_w)
+        form.addRow("Detector ROI:", roi_w)
+        form.addRow("Memory budget:", mem_spin)
+
         # Target size
         size_spin = QSpinBox()
         size_spin.setRange(32, 256); size_spin.setValue(64); size_spin.setSingleStep(16)
@@ -2290,12 +2401,29 @@ class T5(QWidget):
                 from cdi_st.nn_experimental_loader import p10_h5_to_npz
                 ds_path = ds_le.text().strip() or None
                 fio_path = fio_le.text().strip() or None
+                # Compute frame_range from spinboxes (0,0) means "all"
+                fr = None
+                if not (fr_start.value() == 0 and fr_stop.value() == 0):
+                    fr = (fr_start.value(),
+                          fr_stop.value() if fr_stop.value() > 0 else None)
+                # Compute detector_roi if enabled
+                roi = None
+                if roi_check.isChecked() and scan_state['info'] is not None:
+                    n = roi_size.value()
+                    h, w = scan_state['info']['frame_h'], scan_state['info']['frame_w']
+                    cy, cx = h // 2, w // 2
+                    half = n // 2
+                    roi = (max(0, cy - half), min(h, cy + half),
+                           max(0, cx - half), min(w, cx + half))
                 result = p10_h5_to_npz(
                     h5_path=h5_path,
                     npz_path=out_path,
                     fio_path=fio_path,
                     target_size=size_spin.value(),
                     dataset_path=ds_path,
+                    frame_range=fr,
+                    detector_roi=roi,
+                    memory_budget_gb=mem_spin.value(),
                     verbose=True,
                 )
                 shape = result['diffraction'].shape

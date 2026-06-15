@@ -41,6 +41,88 @@ from typing import Optional, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Auto-load HDF5 compression plugins for Eiger/Lambda/Pilatus data.
+#
+# Eiger detectors (used at PETRA III P10/P21 and many other beamlines) write
+# data with bitshuffle + LZ4 compression (filter ID 32008). This filter is
+# NOT bundled with h5py — it lives in the `hdf5plugin` package.
+#
+# Without hdf5plugin, attempting to read a compressed Eiger dataset gives
+# the cryptic error:
+#       "Can't synchronously read data (can't open directory)"
+# This is HDF5 looking for the plugin DLL/SO in a directory that doesn't
+# exist on the user's machine.
+#
+# Importing hdf5plugin registers all common scientific compression filters
+# (bitshuffle, LZ4, zstd, blosc, fcidecomp) with the HDF5 library, after
+# which h5py can read the data transparently.
+#
+# We capture the availability status so we can give a USEFUL error message
+# if the user tries to read a compressed file without hdf5plugin installed.
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    import hdf5plugin  # noqa: F401  — registers LZ4/bitshuffle/zstd filters
+    _HDF5_PLUGINS_AVAILABLE = True
+    _HDF5_PLUGINS_VERSION = getattr(hdf5plugin, 'version', 'unknown')
+except ImportError:
+    _HDF5_PLUGINS_AVAILABLE = False
+    _HDF5_PLUGINS_VERSION = None
+
+# Filter IDs that REQUIRE hdf5plugin (h5py can't read them on its own)
+_PLUGIN_FILTER_IDS = {
+    32000: "LZF (32000) — actually built into h5py, but check",
+    32001: "Blosc (32001)",
+    32004: "LZ4 (32004)",
+    32008: "Bitshuffle + LZ4 (32008) — Eiger detector default",
+    32015: "Zstandard (32015)",
+    32016: "FCIDECOMP (32016)",
+}
+# Filters built into h5py / HDF5 — don't need hdf5plugin:
+_BUILTIN_FILTER_IDS = {0, 1, 2, 4, 32000}   # uncompressed, deflate, shuffle, szip, lzf
+
+
+def _dataset_requires_plugin(dataset) -> Optional[str]:
+    """
+    Check if a dataset uses a compression filter that requires hdf5plugin.
+
+    Returns
+    -------
+    None if the dataset uses only built-in filters.
+    A descriptive string (e.g. "Bitshuffle + LZ4") if the dataset needs
+    hdf5plugin and the filter is one of the known plugin-requiring filters.
+    """
+    try:
+        plist = dataset.id.get_create_plist()
+        for i in range(plist.get_nfilters()):
+            f_info = plist.get_filter(i)
+            fid = f_info[0]
+            if fid in _BUILTIN_FILTER_IDS:
+                continue
+            if fid in _PLUGIN_FILTER_IDS:
+                return _PLUGIN_FILTER_IDS[fid]
+            return f"filter ID {fid}"
+    except Exception:
+        pass
+    return None
+
+
+def _is_compression_plugin_error(err: Exception) -> bool:
+    """
+    Heuristic: detect if an exception is the cryptic "missing HDF5 compression
+    plugin" error. Symptom on Windows: 'Can't synchronously read data (can't
+    open directory)'. On Linux: similar errors mentioning 'open directory' or
+    'plugin'.
+    """
+    msg = str(err).lower()
+    return (
+        "open directory" in msg
+        or "can't open plugin" in msg
+        or "no filter registered" in msg
+        or "filter" in msg and "not available" in msg
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HDF5 structure discovery
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -263,17 +345,32 @@ def diagnose_vds(dataset, dataset_path: str) -> str:
 def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
                           verbose: bool = False):
     """
-    Read a dataset, with graceful fallback if it's a VDS whose sources fail.
+    Read a dataset, with graceful fallback if it's a VDS whose sources fail,
+    or if it requires a compression plugin we don't have.
 
     Strategy:
+        0. If the dataset uses a compression filter that needs hdf5plugin
+           and hdf5plugin is NOT installed, raise a clear error.
         1. If the dataset is a VDS, check whether all its source files exist.
-           If any are missing, REFUSE the bulk read and raise a clear error
-           (because h5py would silently fill with zeros, producing useless
-           all-zero output).
+           If any are missing, REFUSE the bulk read and raise a clear error.
         2. Otherwise, try bulk read.
-        3. If bulk read fails with "open directory" (= VDS source missing
-           at read time), report the diagnostic.
+        3. If bulk read fails with "can't open directory" (= compression
+           plugin missing, or VDS source missing), report a useful error.
     """
+    # Step 0: detect compression plugin requirements BEFORE attempting read
+    filter_desc = _dataset_requires_plugin(ds)
+    if filter_desc is not None and not _HDF5_PLUGINS_AVAILABLE:
+        raise IOError(
+            f"Dataset '{dpath}' is compressed with {filter_desc}.\n"
+            f"This filter requires the `hdf5plugin` Python package,\n"
+            f"which is NOT installed on your system.\n\n"
+            f"FIX: install hdf5plugin and restart CDI-ST:\n"
+            f"    pip install hdf5plugin\n\n"
+            f"After installing, this dataset will read correctly. The\n"
+            f"hdf5plugin package bundles the compression DLLs for Eiger,\n"
+            f"Lambda, and other detectors used at synchrotron beamlines."
+        )
+
     # Step 1: pre-check VDS source reachability
     if hasattr(ds, 'is_virtual') and ds.is_virtual:
         if not _vds_is_readable(ds):
@@ -305,8 +402,33 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
         return np.asarray(ds_arr, dtype=np.float32)
     except (OSError, IOError, RuntimeError) as e:
         bulk_err = str(e)
+        # Triage the error:
+        # 1. If it looks like a compression-plugin issue AND the dataset
+        #    actually uses a plugin filter, raise the clear plugin error.
+        if _is_compression_plugin_error(e):
+            filter_desc = _dataset_requires_plugin(ds)
+            if filter_desc is not None and not _HDF5_PLUGINS_AVAILABLE:
+                raise IOError(
+                    f"Dataset '{dpath}' uses {filter_desc} compression but\n"
+                    f"hdf5plugin is not installed. h5py can decompress the\n"
+                    f"metadata but not the actual data.\n\n"
+                    f"FIX: install hdf5plugin and restart CDI-ST:\n"
+                    f"    pip install hdf5plugin\n\n"
+                    f"This is normal for Eiger / Lambda / Pilatus detector data."
+                ) from e
+            if filter_desc is not None and _HDF5_PLUGINS_AVAILABLE:
+                # hdf5plugin IS installed but the filter still failed —
+                # uncommon edge case (older hdf5plugin missing this filter)
+                raise IOError(
+                    f"Dataset '{dpath}' uses {filter_desc} compression and\n"
+                    f"hdf5plugin {_HDF5_PLUGINS_VERSION} is installed but the\n"
+                    f"filter cannot be loaded. Try upgrading:\n"
+                    f"    pip install --upgrade hdf5plugin\n\n"
+                    f"Original error: {e}"
+                ) from e
+        # 2. If it's a VDS source issue, fall through to the VDS recovery
         if "open directory" not in bulk_err and "external" not in bulk_err.lower():
-            # Not a VDS source issue - re-raise as-is
+            # Not VDS, not plugin — re-raise as-is
             raise
 
     # Step 3: VDS read failed at runtime -> diagnose
@@ -349,7 +471,12 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
 
 
 def inspect_h5(path: str, max_depth: int = 6):
-    """Print the full tree of an .h5 file to help locate the diffraction data."""
+    """Print the full tree of an .h5 file to help locate the diffraction data.
+
+    Unlike a plain visititems() walk, this also enumerates EXTERNAL LINKS
+    (the most common P10/Eiger pattern), which are otherwise invisible.
+    """
+    import os
     try:
         import h5py
     except ImportError:
@@ -358,25 +485,56 @@ def inspect_h5(path: str, max_depth: int = 6):
 
     print(f"\nStructure of {path}:")
     print("=" * 62)
+    base_dir = os.path.dirname(os.path.abspath(path))
+    seen = set()
 
-    def _walk(name, obj):
-        depth = name.count('/')
-        if depth > max_depth:
+    def _show_links_in(grp, path_prefix, indent):
+        """Enumerate keys including external/soft links."""
+        try:
+            keys = list(grp.keys())
+        except Exception:
             return
-        indent = '  ' * depth
-        if hasattr(obj, 'shape'):
-            s = f"{indent}{name}  shape={obj.shape}  dtype={obj.dtype}"
-            # Highlight likely candidates: 3D float/int arrays
-            if len(obj.shape) == 3 and obj.shape[0] > 10:
-                s += "  ← likely diffraction volume"
-            elif len(obj.shape) == 3:
-                s += "  ← 3D dataset"
-            print(s)
-        else:
-            print(f"{indent}{name}/")
+        for k in keys:
+            full = f"{path_prefix}/{k}"
+            if full in seen:
+                continue
+            seen.add(full)
+            try:
+                link = grp.get(k, getlink=True)
+            except Exception:
+                link = None
+            if isinstance(link, h5py.ExternalLink):
+                tgt = link.filename
+                tgt_full = os.path.join(base_dir, tgt) if not os.path.isabs(tgt) else tgt
+                exists = "OK" if os.path.exists(tgt_full) else "MISSING"
+                print(f"{indent}{full}  → external link to "
+                      f"'{tgt}'::'{link.path}'  [{exists}]")
+            elif isinstance(link, h5py.SoftLink):
+                print(f"{indent}{full}  → soft link to '{link.path}'")
+            else:
+                # Real dataset or group
+                try:
+                    obj = grp[k]
+                except Exception:
+                    print(f"{indent}{full}  (unreadable)")
+                    continue
+                if isinstance(obj, h5py.Dataset):
+                    s = f"{indent}{full}  shape={obj.shape}  dtype={obj.dtype}"
+                    if len(obj.shape) == 3 and obj.shape[0] > 10:
+                        s += "  ← likely diffraction volume"
+                    elif len(obj.shape) == 3:
+                        s += "  ← 3D dataset"
+                    if hasattr(obj, 'is_virtual') and obj.is_virtual:
+                        s += "  [VDS]"
+                    print(s)
+                elif isinstance(obj, h5py.Group):
+                    depth = (full.count('/'))
+                    print(f"{indent}{full}/")
+                    if depth < max_depth:
+                        _show_links_in(obj, full, indent + '  ')
 
     with h5py.File(path, 'r') as f:
-        f.visititems(_walk)
+        _show_links_in(f, "", "")
     print("=" * 62)
 
 
@@ -407,6 +565,425 @@ def _vds_is_readable(ds) -> bool:
         return False  # VDS with all sources missing
     except Exception:
         return True   # be permissive on introspection errors
+
+
+def enumerate_external_links(h5_file, group_path: str = "/entry/data") -> list:
+    """
+    Eiger / DESY HDF5 master files store frame data as a series of
+    EXTERNAL LINKS inside `/entry/data/`. Each link has a name like
+    `data_000001`, `data_000002`, ... and points to a separate chunk file.
+
+    External links are NOT visited by `h5py.File.visititems()`, which is why
+    `inspect_h5` shows `/entry/data/` as an empty group even though it
+    contains hundreds of links.
+
+    This function explicitly enumerates the group's keys (which DOES include
+    external links) and returns information about each one.
+
+    Returns
+    -------
+    list of dicts, one per entry:
+        {
+          'name':        'data_000001',
+          'link_type':   'external' | 'soft' | 'dataset' | 'group',
+          'target_file': '<scan>_data_000001.h5'  (only for external),
+          'target_path': '/entry/data/data'       (only for external/soft),
+        }
+    """
+    import h5py
+    try:
+        grp = h5_file[group_path]
+    except (KeyError, OSError):
+        return []
+    if not isinstance(grp, h5py.Group):
+        return []
+
+    out = []
+    try:
+        keys = list(grp.keys())
+    except Exception:
+        return []
+
+    for k in keys:
+        try:
+            link = grp.get(k, getlink=True)
+        except Exception:
+            link = None
+        entry = {'name': k, 'link_type': 'dataset'}
+        if isinstance(link, h5py.ExternalLink):
+            entry['link_type'] = 'external'
+            entry['target_file'] = link.filename
+            entry['target_path'] = link.path
+        elif isinstance(link, h5py.SoftLink):
+            entry['link_type'] = 'soft'
+            entry['target_path'] = link.path
+        else:
+            try:
+                obj = grp[k]
+                if isinstance(obj, h5py.Dataset):
+                    entry['link_type'] = 'dataset'
+                    entry['shape'] = obj.shape
+                elif isinstance(obj, h5py.Group):
+                    entry['link_type'] = 'group'
+            except Exception:
+                entry['link_type'] = 'unknown'
+        out.append(entry)
+    return out
+
+
+def p10_scan_info(
+    h5_path: str,
+    group_path: str = "/entry/data",
+) -> dict:
+    """
+    Cheap preview of a P10 master file: enumerate external links, probe
+    each chunk for frame count + frame shape, and return a summary suitable
+    for showing in a GUI before the user clicks Convert.
+
+    This does NOT decompress any data — it only reads HDF5 metadata, so it
+    is essentially instant even for 381-chunk datasets.
+
+    Parameters
+    ----------
+    h5_path : str
+        Path to the master .h5 file (or any chunk file in the set).
+    group_path : str
+        HDF5 group containing the external links. Default ``/entry/data``.
+
+    Returns
+    -------
+    info : dict with keys
+        - ``master``     : the resolved master file path
+        - ``n_chunks``   : number of external links found
+        - ``n_missing``  : how many chunk files don't exist on disk
+        - ``n_frames``   : total frames across all readable chunks
+        - ``frame_h``    : detector height (pixels)
+        - ``frame_w``    : detector width (pixels)
+        - ``dtype``      : numpy dtype string (e.g. 'uint32')
+        - ``size_full_gb``: GB needed to load all frames at full detector
+        - ``frames_per_chunk``: list of (chunk_name, n_frames_in_chunk)
+    """
+    import os, h5py
+    # Resolve to master if a chunk was passed
+    master = _find_p10_master(h5_path) or h5_path
+    master_dir = os.path.dirname(os.path.abspath(master))
+
+    with h5py.File(master, 'r') as f:
+        links = enumerate_external_links(f, group_path)
+    ext_links = [L for L in links if L['link_type'] == 'external']
+
+    n_missing = 0
+    frames_per_chunk = []
+    n_frames = 0
+    frame_h = frame_w = 0
+    dtype_str = '?'
+    for L in ext_links:
+        tgt_file = L['target_file']
+        tgt_path = L['target_path']
+        chunk_full = (tgt_file if os.path.isabs(tgt_file)
+                       else os.path.join(master_dir, tgt_file))
+        if not os.path.exists(chunk_full):
+            n_missing += 1
+            frames_per_chunk.append((os.path.basename(chunk_full), 0))
+            continue
+        try:
+            with h5py.File(chunk_full, 'r') as chunk:
+                actual_path = (tgt_path if tgt_path in chunk
+                               else _find_chunk_internal_data_path(chunk, hint_path=tgt_path))
+                if actual_path is None:
+                    continue
+                ds = chunk[actual_path]
+                shape = ds.shape
+                n_f = shape[0] if len(shape) == 3 else 1
+                h = shape[-2]; w = shape[-1]
+                n_frames += n_f
+                frame_h = max(frame_h, h)
+                frame_w = max(frame_w, w)
+                dtype_str = str(ds.dtype)
+                frames_per_chunk.append((os.path.basename(chunk_full), n_f))
+        except Exception:
+            frames_per_chunk.append((os.path.basename(chunk_full), 0))
+            continue
+
+    size_full_gb = (n_frames * frame_h * frame_w * 4) / (1024 ** 3)
+    return {
+        'master': master,
+        'n_chunks': len(ext_links),
+        'n_missing': n_missing,
+        'n_frames': n_frames,
+        'frame_h': frame_h,
+        'frame_w': frame_w,
+        'dtype': dtype_str,
+        'size_full_gb': size_full_gb,
+        'frames_per_chunk': frames_per_chunk,
+    }
+
+
+def load_p10_from_external_links(
+    master_path: str,
+    group_path: str = "/entry/data",
+    max_frames: int = None,
+    frame_range: tuple = None,
+    detector_roi: tuple = None,
+    memory_budget_gb: float = 8.0,
+    verbose: bool = True,
+) -> np.ndarray:
+    """
+    Read P10 / Eiger data from a master file by manually resolving its
+    EXTERNAL LINKS to chunk files.
+
+    This is the correct strategy when the master file contains entries like
+    `/entry/data/data_000001` that are external links to separate chunk files
+    (the standard Eiger/DESY layout). Each chunk file contains contiguous
+    detector data at `/entry/data/data`.
+
+    The reader applies optional ``frame_range`` and ``detector_roi`` *during*
+    the read, so reading e.g. 100 frames out of 3000 only allocates the
+    100-frame volume — never the full 49-GB stack.
+
+    Parameters
+    ----------
+    master_path : str
+        Path to the master .h5 file (typically ``<scan>_master.h5``).
+    group_path : str
+        HDF5 group containing the external links. Default ``/entry/data``.
+    max_frames : int or None
+        Truncate the FINAL volume to this many central frames (legacy).
+        Ignored if ``frame_range`` is also given.
+    frame_range : tuple ``(start, stop)`` or None
+        Read only frames ``[start, stop)`` (Python slice semantics) from the
+        *global* frame index across all chunks. ``start=0, stop=None`` means
+        "from start to end". This is applied chunk-by-chunk so memory usage
+        scales with the requested range, not the total dataset size.
+    detector_roi : tuple ``(y0, y1, x0, x1)`` or None
+        Read only this detector region per frame. Indices are half-open
+        like Python slices. Cuts memory by ``(2167*2070)/(roi area)`` for
+        Eiger 4M data.
+    memory_budget_gb : float
+        Maximum acceptable memory footprint (in GB) for the concatenated
+        volume. If the requested read would exceed this, the function
+        raises ``MemoryError`` with a suggested ``frame_range`` and
+        ``detector_roi`` instead of crashing the Python process.
+    verbose : bool
+
+    Returns
+    -------
+    volume : ndarray, shape (N_frames_selected, H, W), float32
+    """
+    import os, h5py
+    master_dir = os.path.dirname(os.path.abspath(master_path))
+
+    with h5py.File(master_path, 'r') as master:
+        links = enumerate_external_links(master, group_path)
+
+    if not links:
+        raise IOError(
+            f"No external links found in '{group_path}' of {master_path}.\n"
+            f"This file may not be a P10 master file."
+        )
+
+    # Filter to only external links (skip groups, etc.)
+    ext_links = [L for L in links if L['link_type'] == 'external']
+    if verbose:
+        print(f"  Master '{os.path.basename(master_path)}' has "
+              f"{len(ext_links)} external link(s) to chunk files")
+        for L in ext_links[:3]:
+            tgt = L.get('target_file', '?')
+            exists = os.path.exists(os.path.join(master_dir, tgt))
+            mark = "OK" if exists else "MISS"
+            print(f"    [{mark}] {L['name']} -> {tgt} :: {L.get('target_path', '?')}")
+        if len(ext_links) > 3:
+            print(f"    ... ({len(ext_links) - 3} more)")
+
+    if not ext_links:
+        raise IOError(
+            f"Group '{group_path}' contains {len(links)} entries but none "
+            f"are external links. Inspect the file structure to see what's "
+            f"there.\nFirst few entries: "
+            f"{[L['name'] + '(' + L['link_type'] + ')' for L in links[:5]]}"
+        )
+
+    # ── Pass 1 (cheap): probe each chunk for its frame count + dtype + shape
+    # We open each file just to read the dataset metadata (essentially free
+    # in HDF5), no data is decompressed yet.
+    chunk_info = []   # list of (chunk_full, internal_path, n_frames, h, w, dtype)
+    n_missing = 0
+    for L in ext_links:
+        tgt_file = L['target_file']
+        tgt_path = L['target_path']
+        chunk_full = (tgt_file if os.path.isabs(tgt_file)
+                       else os.path.join(master_dir, tgt_file))
+        if not os.path.exists(chunk_full):
+            n_missing += 1
+            continue
+        try:
+            with h5py.File(chunk_full, 'r') as chunk:
+                if tgt_path in chunk:
+                    ds = chunk[tgt_path]
+                    actual_path = tgt_path
+                else:
+                    actual_path = _find_chunk_internal_data_path(
+                        chunk, hint_path=tgt_path
+                    )
+                    if actual_path is None:
+                        continue
+                    ds = chunk[actual_path]
+                shape = ds.shape
+                if len(shape) == 2:
+                    n_f, h, w = 1, shape[0], shape[1]
+                elif len(shape) == 3:
+                    n_f, h, w = shape
+                else:
+                    continue
+                chunk_info.append((chunk_full, actual_path, n_f, h, w, ds.dtype))
+        except Exception as e:
+            if _is_compression_plugin_error(e) and not _HDF5_PLUGINS_AVAILABLE:
+                raise IOError(
+                    f"The chunk files use a compression filter that requires "
+                    f"hdf5plugin (most likely bitshuffle+LZ4, standard for "
+                    f"Eiger detectors).\n\n"
+                    f"FIX: install hdf5plugin and restart CDI-ST:\n"
+                    f"    pip install hdf5plugin\n\n"
+                    f"After installing, this dataset will read correctly."
+                ) from e
+            continue
+
+    if not chunk_info:
+        raise IOError(
+            f"Could not enumerate any chunks from master {master_path}.\n"
+            f"  {n_missing} of {len(ext_links)} chunk files are MISSING from\n"
+            f"  {master_dir}.\n\n"
+            f"Copy all `<scan>_data_NNNNNN.h5` files into the same directory."
+        )
+
+    # ── Resolve frame_range against total frames
+    n_total_frames = sum(ci[2] for ci in chunk_info)
+    h0 = chunk_info[0][3]; w0 = chunk_info[0][4]
+    if frame_range is None:
+        global_start, global_stop = 0, n_total_frames
+    else:
+        global_start = max(0, int(frame_range[0]))
+        global_stop = (n_total_frames if frame_range[1] is None
+                       else min(n_total_frames, int(frame_range[1])))
+    n_requested = max(0, global_stop - global_start)
+    if n_requested == 0:
+        raise ValueError(f"Empty frame range: {frame_range}")
+
+    # ── Resolve detector_roi
+    if detector_roi is None:
+        y0, y1, x0, x1 = 0, h0, 0, w0
+    else:
+        y0, y1, x0, x1 = detector_roi
+        y0, y1 = max(0, int(y0)), min(h0, int(y1))
+        x0, x1 = max(0, int(x0)), min(w0, int(x1))
+        if y1 <= y0 or x1 <= x0:
+            raise ValueError(f"Empty detector ROI: {detector_roi}")
+
+    # ── Memory budget check
+    estimated_bytes = n_requested * (y1 - y0) * (x1 - x0) * 4   # float32
+    estimated_gb = estimated_bytes / (1024 ** 3)
+    if verbose:
+        if frame_range is not None or detector_roi is not None:
+            print(f"  Read plan: frames [{global_start}:{global_stop}] of "
+                  f"{n_total_frames}, detector ROI [{y0}:{y1}, {x0}:{x1}] of "
+                  f"[{h0}, {w0}] -> {estimated_gb:.2f} GB")
+        else:
+            print(f"  Read plan: all {n_total_frames} frames, full detector "
+                  f"[{h0}, {w0}] -> {estimated_gb:.2f} GB")
+    if estimated_gb > memory_budget_gb:
+        # Suggest a sensible reduction
+        # If frame_range can save us, prefer that. Otherwise suggest ROI too.
+        suggest_n_frames = int(memory_budget_gb * (1024 ** 3) /
+                                ((y1 - y0) * (x1 - x0) * 4))
+        center = (global_start + global_stop) // 2
+        sug_start = max(global_start, center - suggest_n_frames // 2)
+        sug_stop = min(global_stop, sug_start + suggest_n_frames)
+        suggestion = (
+            f"\n\nSuggestion: pass frame_range=({sug_start}, {sug_stop}) to "
+            f"load only the central {suggest_n_frames} frames around "
+            f"the rocking-curve maximum (~{memory_budget_gb:.0f} GB)."
+        )
+        if (y1 - y0) * (x1 - x0) == h0 * w0:
+            # Full detector — also suggest an ROI
+            suggestion += (
+                f"\nFor BCDI you typically only need a small ROI around the "
+                f"Bragg peak — e.g., detector_roi=(<peak_y>-128, <peak_y>+128, "
+                f"<peak_x>-128, <peak_x>+128)."
+            )
+        raise MemoryError(
+            f"Reading the requested data would allocate ~{estimated_gb:.1f} GB "
+            f"of RAM, which exceeds the memory_budget_gb={memory_budget_gb:.1f} "
+            f"safety limit.{suggestion}\n\n"
+            f"In the GUI: open the P10 dialog, set 'Frame range' and/or "
+            f"'Detector ROI', and try again."
+        )
+
+    # ── Pass 2: read each chunk's slice within the requested frame range
+    out = np.empty(
+        (n_requested, y1 - y0, x1 - x0), dtype=np.float32
+    )
+    cursor = 0    # write position in `out`
+    global_frame = 0    # running global frame index across chunks
+    n_ok = 0
+    for (chunk_full, internal_path, n_f, _h, _w, _dtype) in chunk_info:
+        chunk_global_start = global_frame
+        chunk_global_stop = global_frame + n_f
+        global_frame = chunk_global_stop
+
+        # Compute intersection with [global_start, global_stop)
+        overlap_start = max(chunk_global_start, global_start)
+        overlap_stop = min(chunk_global_stop, global_stop)
+        if overlap_stop <= overlap_start:
+            continue   # this chunk is entirely outside the requested range
+
+        # Local indices within this chunk
+        local_start = overlap_start - chunk_global_start
+        local_stop = overlap_stop - chunk_global_start
+        try:
+            with h5py.File(chunk_full, 'r') as chunk:
+                ds = chunk[internal_path]
+                if len(ds.shape) == 2:
+                    arr = ds[y0:y1, x0:x1][None, :, :]
+                else:
+                    arr = ds[local_start:local_stop, y0:y1, x0:x1]
+                n_read = arr.shape[0]
+                out[cursor:cursor + n_read] = arr.astype(np.float32, copy=False)
+                cursor += n_read
+                n_ok += 1
+        except Exception as e:
+            if _is_compression_plugin_error(e) and not _HDF5_PLUGINS_AVAILABLE:
+                raise IOError(
+                    f"The chunk files use a compression filter that requires "
+                    f"hdf5plugin (most likely bitshuffle+LZ4, standard for "
+                    f"Eiger detectors).\n\n"
+                    f"FIX: install hdf5plugin and restart CDI-ST:\n"
+                    f"    pip install hdf5plugin"
+                ) from e
+            if verbose:
+                print(f"    skip {os.path.basename(chunk_full)} (error: {e})")
+            continue
+
+    if cursor == 0:
+        raise IOError(
+            f"Could not read any chunks. Files may be unreadable.\n"
+            f"  Master:  {master_path}\n"
+            f"  Range:   frames [{global_start}:{global_stop}]"
+        )
+
+    volume = out[:cursor]
+    if verbose:
+        print(f"  Successfully read {volume.shape[0]} frames from {n_ok} "
+              f"chunk(s) via external links")
+        if n_missing > 0:
+            print(f"  WARNING: {n_missing} of {len(ext_links)} chunks missing")
+
+    if frame_range is None and max_frames is not None and volume.shape[0] > max_frames:
+        start = (volume.shape[0] - max_frames) // 2
+        volume = volume[start:start + max_frames]
+        if verbose:
+            print(f"  Truncated to {max_frames} central frames")
+
+    return volume
 
 
 def find_diffraction_dataset(h5_file):
@@ -1647,16 +2224,56 @@ def load_p10_chunks_directly(
 
         # PASS 3: read each chunk and concatenate
         salvaged_volumes = []
+        plugin_error_seen = False
+        plugin_error_filter = None
         for c, p in chunk_paths:
             try:
                 with h5py.File(c, 'r') as f:
-                    arr = f[p][...]
+                    ds = f[p]
+                    # Before reading, check if this chunk needs hdf5plugin
+                    # and we don't have it — bail out IMMEDIATELY rather than
+                    # spam 381 identical errors
+                    if not _HDF5_PLUGINS_AVAILABLE:
+                        needs = _dataset_requires_plugin(ds)
+                        if needs is not None:
+                            plugin_error_seen = True
+                            plugin_error_filter = needs
+                            break
+                    arr = ds[...]
                     if len(arr.shape) == 2:
                         arr = arr[None, :, :]
                     salvaged_volumes.append(arr.astype(np.float32))
             except Exception as e:
+                # Detect compression-plugin error at read time too
+                if _is_compression_plugin_error(e) and not _HDF5_PLUGINS_AVAILABLE:
+                    plugin_error_seen = True
+                    plugin_error_filter = _dataset_requires_plugin(
+                        h5py.File(c, 'r')[p]
+                    ) if True else "compression filter"
+                    # Try to read the filter info — but fall back gracefully
+                    try:
+                        with h5py.File(c, 'r') as f:
+                            plugin_error_filter = (_dataset_requires_plugin(f[p])
+                                                    or "an unsupported filter")
+                    except Exception:
+                        plugin_error_filter = "an unsupported compression filter"
+                    break
                 if verbose:
                     print(f"    Failed reading {os.path.basename(c)}: {e}")
+
+        # If we bailed out due to a missing plugin, give the actionable error
+        if plugin_error_seen:
+            raise IOError(
+                f"The chunk files use {plugin_error_filter} compression, but\n"
+                f"hdf5plugin is NOT installed on your system. This is the\n"
+                f"standard compression for Eiger detectors at PETRA III P10.\n\n"
+                f"FIX: install hdf5plugin and restart CDI-ST:\n"
+                f"    pip install hdf5plugin\n\n"
+                f"After installing, this dataset will read correctly.\n"
+                f"hdf5plugin is a small package (~10 MB) that bundles the\n"
+                f"compression DLLs for Eiger, Lambda, Pilatus, and other\n"
+                f"detectors used at synchrotron beamlines."
+            )
 
         if not salvaged_volumes:
             raise IOError(
@@ -1773,16 +2390,21 @@ def p10_h5_to_npz(
     dataset_path: str = None,
     verbose: bool = True,
     force_direct_chunks: bool = False,
+    frame_range: tuple = None,
+    detector_roi: tuple = None,
+    memory_budget_gb: float = 8.0,
 ):
     """
     Load a P10 (PETRA III / DESY) BCDI scan and save as a .npz that
     CDI-ST reconstruction can use directly.
 
     Robust to several P10 quirks:
-      1. Single chunk file with broken VDS placeholders → reads its own data
-      2. Master file referencing missing chunks → falls back to direct-chunk
-         enumeration (no VDS involvement)
-      3. CXI (.cxi) files in the directory → used as fallback if no chunks
+      1. Master file with external links → reads chunks directly (Eiger default)
+      2. Single chunk with broken VDS placeholders → reads its own data
+      3. Bitshuffle+LZ4 compressed data → requires ``hdf5plugin`` (auto-detected)
+      4. Large multi-thousand-frame scans → use ``frame_range`` / ``detector_roi``
+         to read only a subset (avoids 49-GB memory blow-ups)
+      5. CXI (.cxi) files in the directory → used as fallback if no chunks
 
     Parameters
     ----------
@@ -1793,21 +2415,101 @@ def p10_h5_to_npz(
     fio_path : str or None
         Optional .fio metadata path (motor positions). Auto-found if None.
     target_size : int
-        Output cube size (target_size³).
+        Output cube size (target_size³). The cropped output is centered on
+        the Bragg peak found in the loaded volume.
     dataset_path : str or None
         Explicit HDF5 path to detector data. Auto-detected if None.
     verbose : bool
     force_direct_chunks : bool
         If True, skip the master/VDS attempt and go straight to enumerating
-        chunk files in the directory. Use when you know the master is broken.
+        chunk files in the directory.
+    frame_range : tuple ``(start, stop)`` or None
+        Read only frames in ``[start, stop)`` (across all chunks). Useful for
+        long rocking-curve scans where you only need the frames around the
+        peak. Defaults to ``None`` (all frames).
+    detector_roi : tuple ``(y0, y1, x0, x1)`` or None
+        Read only this detector region per frame. Indices are Python slices.
+        Defaults to ``None`` (full detector).
+    memory_budget_gb : float
+        Maximum estimated memory for the read. If exceeded, the function
+        raises ``MemoryError`` with a suggested ``frame_range`` instead
+        of crashing. Default 8 GB.
     """
     import os
 
     diffraction = None
     primary_error = None
+    external_link_error = None
+
+    # ── Strategy 0: detect if this is an Eiger/P10 MASTER with external links.
+    # If so, this is by far the most reliable read path — bypasses h5py's
+    # link-following entirely by opening chunk files directly.
+    # When external links exist, we ALWAYS prefer this strategy because
+    # the master's link-following mechanism can fail silently (returning
+    # zeros, partial data, or "frames inaccessible" errors) on Windows or
+    # with non-ASCII paths.
+    has_external_links = False
+    if not force_direct_chunks:
+        try:
+            import h5py
+            with h5py.File(h5_path, 'r') as f:
+                for grp_path in ['/entry/data', '/entry/instrument/detector/data',
+                                  '/entry_1/data_1']:
+                    if grp_path not in f:
+                        continue
+                    links = enumerate_external_links(f, grp_path)
+                    if any(L['link_type'] == 'external' for L in links):
+                        has_external_links = True
+                        if verbose:
+                            print(f"  Detected {len([L for L in links if L['link_type']=='external'])} "
+                                  f"external link(s) in '{grp_path}' — this is an Eiger/P10 master file.")
+                        break
+        except Exception:
+            pass
+
+    if has_external_links:
+        # External links exist — try resolving them. The FIRST group we
+        # detected with external links is the right one; only try alternatives
+        # if that one specifically returned "No external links found".
+        first_ext_error = None
+        for ext_grp_path in ['/entry/data', '/entry/instrument/detector/data',
+                              '/entry_1/data_1']:
+            try:
+                raw_volume = load_p10_from_external_links(
+                    h5_path, group_path=ext_grp_path,
+                    max_frames=None,
+                    frame_range=frame_range,
+                    detector_roi=detector_roi,
+                    memory_budget_gb=memory_budget_gb,
+                    verbose=verbose,
+                )
+                diffraction = _preprocess_p10_volume(
+                    raw_volume, target_size=target_size, verbose=verbose,
+                )
+                break
+            except MemoryError:
+                # Re-raise memory errors — user needs to subset their range
+                raise
+            except IOError as inner:
+                # If the failure was "no external links here", keep trying other
+                # group paths. If the failure was "chunks missing" — surface
+                # that immediately, it's the actionable error.
+                msg = str(inner)
+                if "No external links found" in msg:
+                    if first_ext_error is None:
+                        first_ext_error = inner
+                    continue
+                else:
+                    # Real error (chunks missing, unreadable, etc) — surface it
+                    external_link_error = inner
+                    break
+        else:
+            external_link_error = first_ext_error
 
     # ── Strategy 1: master/VDS read via load_h5_diffraction ──────────
-    if not force_direct_chunks:
+    # Only used when there are no external links (or external-link strategy
+    # already failed and we still need to try something).
+    if diffraction is None and not force_direct_chunks:
         try:
             diffraction = load_h5_diffraction(
                 h5_path, dataset_path=dataset_path,
@@ -1817,9 +2519,9 @@ def p10_h5_to_npz(
             primary_error = e
             if verbose:
                 print(f"\n  Master/VDS read failed: {e}")
-                print(f"  Trying direct chunk enumeration as fallback...\n")
+                print(f"  Trying direct chunk enumeration...\n")
 
-    # ── Strategy 2: direct chunk enumeration (bypass VDS) ────────────
+    # ── Strategy 2: direct chunk enumeration (last resort) ───────────
     if diffraction is None:
         try:
             # IMPORTANT: do NOT pass the user's dataset_path to the chunk
@@ -1832,7 +2534,7 @@ def p10_h5_to_npz(
             if user_path_is_vds_like:
                 chunk_path = "/entry/data/data"
                 if verbose:
-                    print(f"  Note: '{dataset_path}' is the broken VDS — "
+                    print(f"  Note: '{dataset_path}' is a VDS/external-link path — "
                           f"chunk fallback will read '/entry/data/data' "
                           f"from each chunk instead.")
             else:
@@ -1849,20 +2551,25 @@ def p10_h5_to_npz(
                 raw_volume, target_size=target_size, verbose=verbose,
             )
         except Exception as e2:
-            # Both strategies failed - raise the most informative error
+            # All strategies failed - aggregate errors for clearest diagnostic
+            err_parts = []
+            if external_link_error is not None:
+                err_parts.append(f"  External-link resolution:\n    "
+                                  f"{external_link_error}")
             if primary_error is not None:
-                raise IOError(
-                    f"Failed to load P10 data via both methods:\n\n"
-                    f"  Master/VDS read:\n    {primary_error}\n\n"
-                    f"  Direct chunk read:\n    {e2}\n\n"
-                    f"Possible solutions:\n"
-                    f"  - Make sure ALL chunk files are in the same directory\n"
-                    f"  - Use 'Inspect HDF5 structure' to see what's inside\n"
-                    f"  - Try opening a single _data_NNNNNN.h5 chunk file\n"
-                    f"  - If you have a .cxi file, use it instead"
-                ) from e2
-            else:
-                raise
+                err_parts.append(f"  Master/VDS read:\n    {primary_error}")
+            err_parts.append(f"  Direct chunk enumeration:\n    {e2}")
+            raise IOError(
+                "Failed to load P10 data via all available methods:\n\n"
+                + "\n\n".join(err_parts) + "\n\n"
+                "Possible solutions:\n"
+                "  - Make sure ALL `<scan>_data_NNNNNN.h5` chunk files are\n"
+                "    in the SAME directory as the master file\n"
+                "  - Use 'Inspect HDF5 structure' to see what's inside —\n"
+                "    look for entries marked '→ external link to ...'\n"
+                "  - For Eiger master files, the data chunks must be on disk\n"
+                "  - Try opening a single chunk file directly"
+            ) from e2
 
     # ── .fio metadata parsing ────────────────────────────────────────
     fio_data = None

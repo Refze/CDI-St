@@ -1,31 +1,41 @@
-# CDI-St requirements
-
+# CDI-ST runtime requirements
+#
+# Core scientific stack
 numpy>=1.22
-
 scipy>=1.10
-
 matplotlib>=3.6
-
 pandas>=1.5
 
+# GUI
 PyQt6>=6.4
-
 PyQt6-WebEngine>=6.4
 
+# Neural network (BCDI phase retrieval)
 torch>=2.0
 
+# Data I/O
 h5py>=3.7
+hdf5plugin>=4.0  # Eiger / Lambda / Pilatus compression filters
 
+# Image processing for marching-cubes (3D isosurface in viewer)
 scikit-image>=0.20
 
+# Crystallography (CIF import, structure factor calculation)
 diffpy.structure>=3.1
 
+# 3D plotly views (lattice viewer, Bragg peak rocking-curve viewer)
 plotly>=5.13
 
-# ──── Optional ──── (uncomment if you need it)
-# 
+# ──── Optional ────
+# ID01 SPEC + EDF data conversion (uncomment if you need it):
 #   silx>=2.0
-#
 #   xrayutilities>=1.7
 #
+# ParaView .vti export with the official VTK library (more reliable;
+# CDI-ST falls back to a manual XML writer if not installed):
 #   vtk>=9.2
+
+# ──── Development tools (only if you're contributing code) ────
+# pytest>=7.0
+# ruff>=0.1
+# build>=1.0
