@@ -1801,6 +1801,48 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
     return result
 
 
+def _filter_existing_edf_frames(edf_template: str, frame_numbers) -> tuple:
+    """
+    Probe the disk to find which EDF frames actually exist for a given
+    template + frame number list.
+
+    SPEC scans sometimes reference frame ranges that include frames the
+    detector never wrote (e.g. acquisition was started a frame late or
+    stopped a frame early). Loading those non-existent frames would either
+    crash the reader or pad the volume with zeros, which contaminates the
+    rocking curve. This helper returns just the frames that exist, plus
+    the indices of the missing ones (so motor arrays can be trimmed
+    consistently).
+
+    Parameters
+    ----------
+    edf_template : str
+        Full filename template with a single %d / %05d for the frame
+        number, e.g. ``/data/scan1/data_mpx4_%05d.edf.gz``.
+    frame_numbers : array-like of int
+        Frame numbers to check.
+
+    Returns
+    -------
+    keep_mask : ndarray of bool, shape (len(frame_numbers),)
+        True where the EDF file exists on disk.
+    existing_numbers : ndarray of int
+        ``frame_numbers[keep_mask]`` — convenience for the caller.
+    missing_numbers : ndarray of int
+        Frame numbers that did NOT have a file on disk.
+    """
+    import os
+    frame_numbers = np.asarray(frame_numbers, dtype=np.int64)
+    keep_mask = np.zeros(len(frame_numbers), dtype=bool)
+    for i, fr in enumerate(frame_numbers):
+        path = edf_template % int(fr)
+        if os.path.exists(path):
+            keep_mask[i] = True
+    existing = frame_numbers[keep_mask]
+    missing = frame_numbers[~keep_mask]
+    return keep_mask, existing, missing
+
+
 def read_edf_stack(edf_template: str, frame_numbers: list,
                     detector_shape: tuple = (516, 516)) -> np.ndarray:
     """
@@ -1935,6 +1977,85 @@ def load_spec_edf_scan(
               f"{int(frame_numbers.min())}-{int(frame_numbers.max())} "
               f"({len(frame_numbers)} total)")
         print(f"  Loading from {edf_dir}")
+
+    # 2a. Filter to frames that ACTUALLY exist on disk. Acquisitions are
+    # sometimes started a frame late or stopped a frame early, so the SPEC
+    # scan can list more frames than were written. If we kept the missing
+    # frames as zeros, they would corrupt the rocking curve AND the motor
+    # arrays would no longer correspond to the loaded data.
+    keep_mask, existing_frames, missing_frames = _filter_existing_edf_frames(
+        edf_template, frame_numbers
+    )
+    n_existing = int(keep_mask.sum())
+    n_missing = int((~keep_mask).sum())
+    if n_existing == 0:
+        # No file exists for ANY frame — almost certainly a wrong template
+        # or wrong directory. Surface a clear error before read_edf_stack
+        # tries (and fails to) read 401 nonexistent files.
+        first_few = ", ".join(str(int(fr)) for fr in frame_numbers[:5])
+        raise FileNotFoundError(
+            f"None of the {len(frame_numbers)} EDF frames referenced by "
+            f"scan {scan_number} exist on disk. Checked frames: {first_few}…\n"
+            f"Template:   {edf_template}\n"
+            f"Directory:  {edf_dir}\n\n"
+            f"Likely causes:\n"
+            f"  - Wrong EDF directory\n"
+            f"  - Filename template doesn't match (e.g. .edf vs .edf.gz,\n"
+            f"    or different prefix than 'data_mpx4_')\n"
+            f"  - Wrong scan number selected"
+        )
+
+    if n_missing > 0 and verbose:
+        # Show a concise summary: which leading/trailing frames are missing.
+        # Group consecutive missing frames at the edges into ranges for
+        # legibility (e.g. "262" or "262-265" rather than "262, 263, 264, 265").
+        def _format_run(arr):
+            if len(arr) == 0:
+                return ""
+            if len(arr) == 1:
+                return str(int(arr[0]))
+            return f"{int(arr[0])}-{int(arr[-1])}"
+
+        leading_missing = []
+        trailing_missing = []
+        # Edges: any leading run of missing
+        for i in range(len(keep_mask)):
+            if keep_mask[i]:
+                break
+            leading_missing.append(int(frame_numbers[i]))
+        for i in range(len(keep_mask) - 1, -1, -1):
+            if keep_mask[i]:
+                break
+            trailing_missing.append(int(frame_numbers[i]))
+        trailing_missing.reverse()
+        internal_missing_count = (n_missing - len(leading_missing)
+                                   - len(trailing_missing))
+        parts = []
+        if leading_missing:
+            parts.append(f"leading frame(s) {_format_run(leading_missing)}")
+        if trailing_missing:
+            parts.append(f"trailing frame(s) {_format_run(trailing_missing)}")
+        if internal_missing_count > 0:
+            parts.append(f"{internal_missing_count} interior frame(s)")
+        where = ", ".join(parts) if parts else f"{n_missing} frame(s)"
+        print(f"  Note: {n_missing} of {len(frame_numbers)} EDF files are "
+              f"missing ({where}). Loading the {n_existing} that exist; "
+              f"motor arrays trimmed to match.")
+
+    # 2b. Trim frame_numbers AND every per-frame motor array to the
+    # frames that actually exist. After this point the data and motors
+    # stay in lock-step.
+    frame_numbers = existing_frames
+    for k in ('eta', 'phi', 'nu', 'delta', 'mpx4inr'):
+        v = spec_data.get(k)
+        if v is None:
+            continue
+        v_arr = np.asarray(v)
+        # Only filter per-frame arrays (length matches the original count)
+        if v_arr.ndim == 1 and len(v_arr) == len(keep_mask):
+            spec_data[k] = v_arr[keep_mask]
+
+    # 2c. Load only the frames we know are there.
     volume = read_edf_stack(edf_template, frame_numbers, detector_shape)
     if verbose:
         print(f"  Raw stack: shape={volume.shape}  max={volume.max():.2e}")
