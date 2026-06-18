@@ -1,8 +1,24 @@
 # Changelog
 
 All notable changes to CDI-ST are documented here.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.2.2] — 2026-06-18
+
+### Fixed
+- **ID01 SPEC+EDF conversion now tolerates missing edge frames.**
+  Acquisitions are sometimes started a frame late or stopped a frame
+  early, so a SPEC scan can list frames 262–662 (401 points) while the
+  EDF directory only has 263–661 (399 files). The converter now probes
+  the disk first, loads only the EDF files that actually exist, and
+  trims the per-frame motor arrays (`eta`, `phi`, `nu`, `delta`,
+  `mpx4inr`) to stay in lock-step with the loaded data. A clear note
+  identifies which leading / trailing / interior frames were skipped.
+  New helper `_filter_existing_edf_frames()` exposes this filtering for
+  programmatic use.
 
 ## [0.2.1] — 2026-06-15
 
@@ -66,42 +82,6 @@ All notable changes to CDI-ST are documented here.
 - `inspect_h5()` now properly shows external links with their target
   files and `[OK]` / `[MISSING]` markers. The empty-looking `/entry/data/`
   group on Eiger masters is no longer misleading.
-
-
-## [0.1.3] — 2026-05-20
-
-### Fixed
-- Fixed exporting VTI to Paraview
-
-### Added
-- SPEC+EDF converter: Added option to convert multiple scans
-
-
-## [0.1.2] — 2026-05-20
-
-### Fixed
-- SPEC+EDF converter: scan listing, frame range display, clear errors when EDFs fail to load
-- silx data column indexing
-- `find_bragg_peak_box` slice/int crash on empty volumes
-
-### Added
-- "Browse scans…" button in SPEC+EDF dialog
-
-## [0.1.1] — 2026-05-20
-
-### Fixed
-- SPEC+EDF converter crash with "slice - int" error when EDF files could not be loaded (`find_bragg_peak_box` now returns coordinates instead of slices in the zero-volume fallback)
-- silx data column indexing was wrong — modern silx returns `data.shape == (nlines, ncolumns)`, so `data[i]` was the i-th measurement row, not the i-th column. Now uses `scan.data_column_by_name(label)` with shape-aware fallback
-- Clear error message when no EDF frames can be loaded (lists likely causes instead of crashing later)
-- SPEC+EDF converter now prints the frame range of the chosen scan before loading
-
-### Added
-- New "Browse scans…" button in SPEC+EDF dialog: lists every scan in the SPEC file with its CCD frame range, so users can pick the scan matching their downloaded EDF files
-- New `list_spec_scans()` helper in `nn_experimental_loader.py`
-
-### Changed
-- Renamed output field "Output .npz:" to "Output file (.npz):" with clarifying placeholder and tooltip
-
 
 ## [0.1.0] — Alpha — 2026-05-08
 

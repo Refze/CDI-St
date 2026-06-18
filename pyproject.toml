@@ -3,8 +3,8 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cdi-stools"
-version = "0.2.1"
+name = "cdi-st"
+version = "0.2.2"
 description = "Coherent Diffraction Imaging Simulation Tools — BCDI simulation and NN-based phase retrieval"
 readme = "README.md"
 requires-python = ">=3.9"
