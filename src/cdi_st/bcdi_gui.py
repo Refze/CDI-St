@@ -15,11 +15,18 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from bcdi_core import (MATERIAL_PRESETS,DETECTOR_PRESETS,BCDIConfig,CrystalBuilder,ReflectionCalculator,
+if __package__:                      # installed as cdi_st
+    from .bcdi_core import (MATERIAL_PRESETS,DETECTOR_PRESETS,BCDIConfig,CrystalBuilder,ReflectionCalculator,
     BCDISimulator,DislocationConfig,DislocationLoopConfig,lattice_html_with_controls,bragg_html_with_controls,
     add_experimental_noise,export_measurement,load_cif_as_preset,find_preset,default_shape_for_material,
-    compatible_shapes,cells_for_size_nm,to_frame)
-import facets
+    compatible_shapes,cells_for_size_nm,to_frame,offset_report)
+    from . import facets
+else:                                # run from a plain folder
+    from bcdi_core import (MATERIAL_PRESETS,DETECTOR_PRESETS,BCDIConfig,CrystalBuilder,ReflectionCalculator,
+    BCDISimulator,DislocationConfig,DislocationLoopConfig,lattice_html_with_controls,bragg_html_with_controls,
+    add_experimental_noise,export_measurement,load_cif_as_preset,find_preset,default_shape_for_material,
+    compatible_shapes,cells_for_size_nm,to_frame,offset_report)
+    import facets
 
 QSS="""QMainWindow,QWidget{background:#0d1117;color:#e6edf3;font-family:'Segoe UI','Consolas',sans-serif;font-size:10pt}
 QTabWidget::pane{border:1px solid #30363d;background:#0d1117;top:-1px}QTabBar::tab{background:#161b22;color:#8b949e;padding:10px 22px;margin-right:2px;border:1px solid #30363d;border-bottom:none;border-top-left-radius:6px;border-top-right-radius:6px;font-weight:600;min-width:140px}QTabBar::tab:selected{background:#0d1117;color:#4f98a3;border-bottom:2px solid #4f98a3}QTabBar::tab:disabled{color:#30363d}
@@ -304,7 +311,6 @@ class T2(QWidget):
         self.os.setValue(round(v/25.6,1))
         if hasattr(self,'ang_lbl'): self._ang_info()
     def _ang_info(self):
-        from bcdi_core import offset_report
         t=self.custom_angle.value()
         if self.config is None or t<=0.01 or self._rdf is None or not len(self._rdf):
             self.ang_lbl.setText("");return

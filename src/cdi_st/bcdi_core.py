@@ -13,7 +13,8 @@ try:
     import xrayutilities as xu; _HAS_XU=True
 except: xu=None; _HAS_XU=False
 warnings.filterwarnings('ignore')
-import facets, ortho
+if __package__: from . import facets, ortho
+else: import facets, ortho
 
 def _6c_R3m(z):
     return [[0,0,z%1],[2/3,1/3,(z+1/3)%1],[1/3,2/3,(z+2/3)%1],[0,0,(1-z)%1],[2/3,1/3,(1-z+1/3)%1],[1/3,2/3,(1-z+2/3)%1]]
@@ -93,7 +94,7 @@ MATERIAL_PRESETS={
 }
 
 def load_cif_as_preset(cif_path):
-    """Load a CIF file and return a material dict compatible with MATERIAL_PRESETS."""
+
     s=PmgStructure.from_file(cif_path)
     sga=SpacegroupAnalyzer(s,symprec=0.1)
     sg_sym=sga.get_space_group_symbol()
@@ -124,7 +125,7 @@ def compatible_shapes(n):
     return ded(base+['hexagonal']+facets.CUBIC_SHAPES+facets.HEX_SHAPES)
 
 def cells_for_size_nm(name,size_nm):
-    """Supercell multiples giving a particle of the requested size in nm."""
+
     c=BCDIConfig(name);M=c.lattice_vectors_cartesian;t=float(size_nm)*10.
     return tuple(max(1,int(round(t/np.linalg.norm(M[i])))) for i in range(3))
 def find_preset(q):
@@ -139,7 +140,6 @@ class DislocationConfig:
         self.dtype=dtype;self.pos_frac=pos_frac;self.line_dir=line_dir;self.b_angstrom=b_angstrom;self.nu=nu;self.b_edge=b_edge;self.b_screw=b_screw
 
 class DislocationLoopConfig:
-    """Prismatic dislocation loop: atomsk-style parameters."""
     def __init__(self,center_frac=(.5,.5,.5),radius_angstrom=20.,b_angstrom=None,
                  normal='Z',nu=.3):
         self.center_frac=center_frac;self.radius_angstrom=radius_angstrom
@@ -504,12 +504,6 @@ class BCDISimulator:
 def add_experimental_noise(vol,n_photons=None,photon_mode='total',poisson=True,air_scatter=0,
                            readout_noise=0,dark_cps=0,exposure_s=1.,dead_pixels_frac=0,
                            hot_pixels_frac=0,counting=True,seed=42):
-    """Photon budget first, then instrument effects.
-
-    n_photons sets the counting statistics: everything else is relative to it.
-    readout_noise applies only to integrating detectors (counting=False); EIGER,
-    PILATUS, MAXIPIX, MERLIN and TIMEPIX are photon counting and have none.
-    """
     rng=np.random.default_rng(seed);out=np.asarray(vol,np.float64)
     if air_scatter>0:
         N=out.shape[0];c=N//2;r0=max(1,N//4);x=np.arange(N)-c;QX,QY,QZ=np.meshgrid(x,x,x,indexing='ij')
@@ -523,26 +517,18 @@ def add_experimental_noise(vol,n_photons=None,photon_mode='total',poisson=True,a
                                 dead_frac=dead_pixels_frac,hot_frac=hot_pixels_frac,seed=seed)
 
 def q_sampling(cfg,theta_B_rad=None):
-    """Compare the simulation q voxel with a real detector pixel.
-
-    The simulated grid is set by the particle size and oversampling; the panel
-    grid by pixel size and distance. Matching them 1:1 needs N >> OS, so the
-    simulation is deliberately coarser. Returns (dq_sim, dq_pixel, implied_OS).
-    """
     k=2*np.pi/cfg.wavelength_angstrom
     dq_sim=(2*np.pi/cfg.particle_size_angstrom[0])/cfg.TARGET_OVERSAMPLING
     dq_pix=k*(cfg.DETECTOR_PIXEL_UM*1e-6)/cfg.SAMPLE_DETECTOR_DISTANCE_M
     return dq_sim,dq_pix,(2*np.pi/cfg.particle_size_angstrom[0])/dq_pix
 
 def offset_report(cfg,theta_B_rad,d2th_deg):
-    """What a 2theta offset does: dq, shift in sim voxels and in real pixels."""
     dq=(4*np.pi/cfg.wavelength_angstrom)*np.cos(theta_B_rad)*np.radians(d2th_deg/2.)
     ds,dp,_=q_sampling(cfg)
     N=cfg.DETECTOR_N_PIXELS
     return dq,dq/ds,dq/dp,abs(dq/ds)>N/2
 
 def to_frame(sim,frame='lab',vol=None):
-    """Return (volume, label). 'lab' = orthogonal q; 'det' = raw skewed detector grid."""
     v=sim.diff_volume if vol is None else vol
     if frame!='det': return v,'sample / lab frame (orthogonal q)'
     c=sim.config;tt=np.degrees(sim.reflection['two_theta_rad'])
@@ -551,7 +537,6 @@ def to_frame(sim,frame='lab',vol=None):
     return ortho.lab_to_det(v,sim.q_grids,M,order=3),f'detector frame (raw grid, skew={ortho.skew(M):.3f})'
 
 def export_measurement(sim,refl,cfg,filepath,noise_opts=None):
-    """Export simulation as .npz (like real BCDI measurement data)."""
     vol=sim.diff_volume.copy()
     if noise_opts: vol=add_experimental_noise(vol,**noise_opts)
     data={'diffraction_volume':vol,'qx':sim.q_grids['qx'],'qy':sim.q_grids['qy'],'qz':sim.q_grids['qz'],
@@ -584,7 +569,7 @@ def _sr(label,sid,mn,mx,val,step,jsfn,unit='%'):
 
 
 def _loading_html(title="Rendering 3D..."):
-    """Loading overlay with progress bar + timeout fallback (never gets stuck)."""
+
     return f'''<div id="loadOvr" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#0d0e12;z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column"><div style="color:#4f98a3;font-size:16px;font-weight:700;margin-bottom:20px">{title}</div><div style="width:220px;height:6px;background:#161b22;border-radius:3px;overflow:hidden"><div id="loadBar" style="width:0%;height:100%;background:#4f98a3;border-radius:3px;transition:width 0.3s"></div></div><div id="loadPct" style="color:#8b949e;font-size:11px;margin-top:8px">0%</div></div><script>(function(){{var b=document.getElementById("loadBar"),t=document.getElementById("loadPct"),o=document.getElementById("loadOvr"),p=0;var iv=setInterval(function(){{p=Math.min(p+2+Math.random()*4,90);b.style.width=p+"%";t.innerText=Math.round(p)+"%"}},200);function done(){{clearInterval(iv);b.style.width="100%";t.innerText="100%";setTimeout(function(){{o.style.opacity="0";o.style.transition="opacity 0.3s";setTimeout(function(){{o.style.display="none"}},350)}},200)}};var gd=document.querySelector(".plotly-graph-div");if(gd&&gd.on)gd.on("plotly_afterplot",done);setTimeout(done,8000)}})();</script>'''
 
 def lattice_html_with_controls(builder,max_atoms=50000,atom_size=3,show_bonds=False,show_strain=False,show_dislocation=False):
