@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.2] - 2026-11-08
+
+### Fixed
+
+- The launcher window was missing: `main()` opened the simulation window
+  directly, so the data-analysis tabs were unreachable from the installed
+  package. The v0.3.0 rewrite of `bcdi_gui.py` had dropped `Launcher`,
+  `CDIStSplash`, `MW_Analysis` and `ReportsDialog`. All four are restored, and
+  `MW_Sim` keeps its Reports & Suggestions button.
+
+## [0.3.1] - 2026-11-08
+
+### Fixed
+
+- `ModuleNotFoundError: No module named 'bcdi_core'` on launch. The modules
+  imported each other as top-level names, which works when the files sit
+  together in one folder but not from inside the `cdi_st` package. Imports are
+  now package-relative, with a fallback so the files still run directly from a
+  plain folder.
+
 ## [0.3.0] - 2026-11-08
 
 Faceted particles, photon-budget noise, detector/sample space, standalone phase
