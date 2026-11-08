@@ -1,12 +1,12 @@
-import sys,tempfile,os
+import sys,tempfile,os,time
 import numpy as np
 from collections import Counter
-from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer
-from PyQt6.QtGui import QPalette,QColor,QFont
+from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer,QRect
+from PyQt6.QtGui import QPalette,QColor,QFont,QPixmap,QPainter,QBrush,QPen
 from PyQt6.QtWidgets import (QApplication,QMainWindow,QWidget,QTabWidget,QVBoxLayout,QHBoxLayout,
     QFormLayout,QGridLayout,QGroupBox,QLabel,QPushButton,QComboBox,QSpinBox,QDoubleSpinBox,
     QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QProgressBar,QMessageBox,QStatusBar,
-    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog)
+    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog,QSplashScreen)
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView; _HAS_WEB=True
 except: _HAS_WEB=False
@@ -27,6 +27,11 @@ else:                                # run from a plain folder
     add_experimental_noise,export_measurement,load_cif_as_preset,find_preset,default_shape_for_material,
     compatible_shapes,cells_for_size_nm,to_frame,offset_report)
     import facets
+try:
+    if __package__: from .nn_gui_tabs import T_Gen,T4,T4_Sup,T5,T6
+    else: from nn_gui_tabs import T_Gen,T4,T4_Sup,T5,T6
+    _HAS_NN=True
+except Exception: _HAS_NN=False
 
 QSS="""QMainWindow,QWidget{background:#0d1117;color:#e6edf3;font-family:'Segoe UI','Consolas',sans-serif;font-size:10pt}
 QTabWidget::pane{border:1px solid #30363d;background:#0d1117;top:-1px}QTabBar::tab{background:#161b22;color:#8b949e;padding:10px 22px;margin-right:2px;border:1px solid #30363d;border-bottom:none;border-top-left-radius:6px;border-top-right-radius:6px;font-weight:600;min-width:140px}QTabBar::tab:selected{background:#0d1117;color:#4f98a3;border-bottom:2px solid #4f98a3}QTabBar::tab:disabled{color:#30363d}
@@ -486,24 +491,334 @@ class T3(QWidget):
         self.c1.draw();self.c2.draw()
 
 # ======================= MAIN =======================
-class MW(QMainWindow):
+class ReportsDialog(QWidget):
+    RECIPIENT = "saidisoufiane@hotmail.com"
+    def __init__(self,parent=None):
+        super().__init__(parent,Qt.WindowType.Dialog)
+        self.setWindowTitle("Reports & Suggestions");self.setFixedSize(480,360);self.setStyleSheet(QSS)
+        v=QVBoxLayout(self);v.setContentsMargins(16,16,16,16);v.setSpacing(10)
+        title=QLabel("Reports & Suggestions");title.setStyleSheet("color:#4f98a3;font-size:14pt;font-weight:700");v.addWidget(title)
+        info=QLabel("<span style='color:#8b949e;font-size:9pt'>"
+                    "Both fields are required. "
+                    "Your default mail client will open with the message ready to send."
+                    "</span>")
+        info.setWordWrap(True);v.addWidget(info)
+        v.addWidget(QLabel("Your email:"));self.email_le=QLineEdit();self.email_le.setPlaceholderText("you@example.com");v.addWidget(self.email_le)
+        v.addWidget(QLabel("Message:"));self.msg_te=QPlainTextEdit();self.msg_te.setPlaceholderText("Describe the issue or suggestion...");self.msg_te.setMinimumHeight(140);v.addWidget(self.msg_te,1)
+        self.status=QLabel("");self.status.setWordWrap(True);self.status.setStyleSheet("font-size:9pt");v.addWidget(self.status)
+        br=QHBoxLayout();br.addStretch()
+        cancel=QPushButton("Cancel");cancel.setStyleSheet("background:#30363d;padding:7px 14px");cancel.clicked.connect(self.close);br.addWidget(cancel)
+        send=QPushButton("Send");send.setStyleSheet("background:#238636;padding:7px 18px;font-weight:600");send.clicked.connect(self._send);br.addWidget(send)
+        v.addLayout(br)
+    def _validate_email(self,e):
+        import re
+        return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$",e))
+    def _send(self):
+        email=self.email_le.text().strip();msg=self.msg_te.toPlainText().strip()
+        if not email:
+            self.status.setText("<span style='color:#da3633'>Email is required.</span>");return
+        if not self._validate_email(email):
+            self.status.setText("<span style='color:#da3633'>Please enter a valid email address.</span>");return
+        if not msg:
+            self.status.setText("<span style='color:#da3633'>Message is required.</span>");return
+        # Open the user's default mail client via mailto:
+        import urllib.parse,webbrowser
+        subject=urllib.parse.quote(f"BCDI Software - Report from {email}")
+        body=urllib.parse.quote(f"From: {email}\n\n{msg}")
+        url=f"mailto:{self.RECIPIENT}?subject={subject}&body={body}"
+        try:
+            webbrowser.open(url,new=1)
+            self.status.setText(
+                f"<span style='color:#3fb950'>\u2713 Opening your mail client. "
+                f"Click 'Send' there to deliver the message to {self.RECIPIENT}.</span>"
+            )
+            QTimer.singleShot(2500,self.close)
+        except Exception as e:
+            # Fallback: copy mailto URL to clipboard
+            try:
+                cb=QApplication.clipboard();cb.setText(f"To: {self.RECIPIENT}\nFrom: {email}\n\n{msg}")
+                self.status.setText(
+                    f"<span style='color:#f0883e'>Could not open mail client automatically. "
+                    f"The message has been copied to clipboard \u2014 please paste it into "
+                    f"an email to {self.RECIPIENT}.</span>"
+                )
+            except Exception as e2:
+                self.status.setText(f"<span style='color:#da3633'>Failed: {e2}</span>")
+
+def _make_reports_button(parent):
+    btn=QPushButton("Reports && Suggestions",parent)
+    # 60% smaller than the previous version: smaller padding, smaller font, smaller height
+    btn.setStyleSheet(
+        "background:#1f6feb;color:#fff;padding:1px 6px;border-radius:3px;"
+        "font-size:7pt;font-weight:600;border:none"
+    )
+    btn.setToolTip("Send feedback or report a bug")
+    btn.setFixedHeight(16)
+    btn.adjustSize()
+    btn._dialog=None
+    def _open():
+        if btn._dialog is None or not btn._dialog.isVisible():
+            btn._dialog=ReportsDialog(parent)
+        btn._dialog.show();btn._dialog.raise_();btn._dialog.activateWindow()
+    btn.clicked.connect(_open)
+    return btn
+
+class MW_Sim(QMainWindow):
     def __init__(self):
-        super().__init__();self.setWindowTitle("BCDI Simulator v6.0");self.resize(1500,960);self.setMinimumSize(1200,800)
+        super().__init__();self.setWindowTitle("BCDI Simulation");self.resize(1500,960);self.setMinimumSize(1200,800)
         self.tabs=QTabWidget();self.tabs.setDocumentMode(True);self.t1=T1();self.t2=T2();self.t3=T3()
         self.tabs.addTab(self.t1," 1 Material ");self.tabs.addTab(self.t2," 2 Beam ");self.tabs.addTab(self.t3," 3 Results ")
         self.tabs.setTabEnabled(1,False);self.tabs.setTabEnabled(2,False);self.setCentralWidget(self.tabs)
         sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Build lattice first.")
         self.t1.built.connect(self._ob);self.t1.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(1))
         self.t2.sim_req.connect(self._os);self.t2.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(2));self._sw=None
+        self.report_btn=_make_reports_button(self);self._reposition_reports()
+    def resizeEvent(self,e):
+        super().resizeEvent(e);self._reposition_reports()
+    def _reposition_reports(self):
+        m=10;h=self.statusBar().height() if self.statusBar() else 0
+        self.report_btn.move(self.width()-self.report_btn.width()-m,self.height()-self.report_btn.height()-h-m);self.report_btn.raise_()
     def _ob(self,c,b): self.t2.sc(c,b);self.tabs.setTabEnabled(1,True)
     def _os(self,p):
         self._sw=SW(p['config'],p['builder'],p['hkl']);self._sw.progress.connect(self.t2.pg.setValue);self._sw.log.connect(self.t2.lg.appendPlainText)
         self._sw.done.connect(self._sd);self._sw.failed.connect(self._sf);self._sw.start()
     def _sd(self,s,r,d): self.t2.sb_.setEnabled(True);self.t2.nb.setEnabled(True);self.t3.display(s,r,s.config);self.tabs.setTabEnabled(2,True)
     def _sf(self,m): self.t2.sb_.setEnabled(True);self.t2.lg.appendPlainText(f"FAIL: {m}")
+
+class MW_Analysis(QMainWindow):
+    def __init__(self,parent=None):
+        super().__init__(parent);self.setWindowTitle("BCDI Data Analysis");self.resize(1500,960);self.setMinimumSize(1200,800)
+        if not _HAS_NN:
+            QMessageBox.critical(self,"Missing module",
+                "The data analysis module (nn_gui_tabs) is not available. "
+                "Make sure all NN-related files are present.")
+            QTimer.singleShot(0,self.close);return
+        central=QWidget();vl=QVBoxLayout(central);vl.setContentsMargins(0,0,0,0);vl.setSpacing(0)
+        self.tabs=QTabWidget();self.tabs.setDocumentMode(True)
+        self.tg=T_Gen();self.t4=T4();self.t4s=T4_Sup();self.t5=T5();self.t6=T6()
+        self.tabs.addTab(self.tg,"Generate Data")
+        self.tabs.addTab(self.t4,"AutoPhase_NN")
+        self.tabs.addTab(self.t4s,"CDI_NN")
+        self.tabs.addTab(self.t5,"Reconstruction")
+        self.tabs.addTab(self.t6,"3D Viewer")
+        self.t5.recon_done.connect(self.t6.set_result)
+        vl.addWidget(self.tabs,1)
+        self.setCentralWidget(central)
+        sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Generate training data, train models, then run reconstruction.")
+        # Reports button bottom-right
+        self.report_btn=_make_reports_button(self)
+        self._reposition_reports()
+    def resizeEvent(self,e):
+        super().resizeEvent(e);self._reposition_reports()
+    def _reposition_reports(self):
+        if hasattr(self,'report_btn'):
+            margin=10;sb_h=self.statusBar().height() if self.statusBar() else 0
+            self.report_btn.move(self.width()-self.report_btn.width()-margin,
+                                  self.height()-self.report_btn.height()-sb_h-margin)
+            self.report_btn.raise_()
+
+def _logo_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "CDI_ST_logo.png"),
+        os.path.join(here, "CDI_NN_logo.png"),
+        os.path.join(here, "logo.png"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+class CDIStSplash(QSplashScreen):
+    def __init__(self):
+        # Build the splash pixmap: logo image + space below for loading bar
+        logo = _logo_path()
+        if logo is not None:
+            base_pix = QPixmap(logo)
+            if base_pix.isNull():
+                base_pix = self._fallback_pixmap()
+        else:
+            base_pix = self._fallback_pixmap()
+        # Scale to a reasonable splash size if needed
+        if base_pix.width() > 700:
+            base_pix = base_pix.scaledToWidth(700, Qt.TransformationMode.SmoothTransformation)
+        # Create a final pixmap with extra space for the loading bar + status text
+        BAR_H = 64  # extra height below the logo for bar + text
+        full = QPixmap(base_pix.width(), base_pix.height() + BAR_H)
+        full.fill(QColor("#0d1117"))   # dark background matching app theme
+        p = QPainter(full)
+        p.drawPixmap(0, 0, base_pix)
+        p.end()
+        super().__init__(full, Qt.WindowType.WindowStaysOnTopHint)
+        self.setFixedSize(full.size())
+        self._logo_h = base_pix.height()
+        self._bar_h = BAR_H
+        self._progress = 0
+        self._status = "Loading..."
+        # Loading bar overlay (drawn in drawContents)
+    def _fallback_pixmap(self):
+        pix = QPixmap(640, 280)
+        pix.fill(QColor("#0d1117"))
+        p = QPainter(pix)
+        # Title
+        p.setPen(QColor("#e6edf3"))
+        f = QFont(); f.setPointSize(48); f.setBold(True); f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 4)
+        p.setFont(f)
+        p.drawText(QRect(0, 50, 640, 80), Qt.AlignmentFlag.AlignCenter, "CDI-ST")
+        # Subtitle
+        p.setPen(QColor("#8b949e"))
+        f2 = QFont(); f2.setPointSize(13)
+        p.setFont(f2)
+        p.drawText(QRect(0, 150, 640, 30), Qt.AlignmentFlag.AlignCenter,
+                   "Coherent Diffraction Imaging Simulation Tools")
+        p.end()
+        return pix
+    def set_progress(self, value, status=""):
+        self._progress = max(0, min(100, int(value)))
+        if status:
+            self._status = status
+        self.repaint()
+    def drawContents(self, painter):
+        # Draw loading bar + status text in the strip below the logo
+        w = self.width()
+        bar_y_top = self._logo_h + 18
+        bar_x = 40
+        bar_w = w - 80
+        bar_h = 8
+        # Track
+        painter.setBrush(QBrush(QColor("#161b22")))
+        painter.setPen(QPen(QColor("#30363d"), 1))
+        painter.drawRoundedRect(bar_x, bar_y_top, bar_w, bar_h, 3, 3)
+        # Filled portion
+        if self._progress > 0:
+            painter.setBrush(QBrush(QColor("#4f98a3")))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(bar_x, bar_y_top, int(bar_w * self._progress / 100.0), bar_h, 3, 3)
+        # Status text
+        painter.setPen(QColor("#8b949e"))
+        f = QFont(); f.setPointSize(9)
+        painter.setFont(f)
+        painter.drawText(
+            QRect(bar_x, bar_y_top + bar_h + 6, bar_w, 18),
+            Qt.AlignmentFlag.AlignCenter,
+            self._status
+        )
+
+class Launcher(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("CDI-ST")
+        # Sized so the 678x340 logo fits at a reasonable scale
+        self.setFixedSize(560, 540)
+        self.sim_window = None
+        self.analysis_window = None
+        central = QWidget()
+        central.setStyleSheet("background:#0d1117")
+        v = QVBoxLayout(central)
+        v.setContentsMargins(20, 16, 20, 14)
+        v.setSpacing(12)
+        # Logo image at the top (matches splash screen)
+        logo = _logo_path()
+        if logo is not None:
+            pix = QPixmap(logo)
+            if not pix.isNull():
+                # Scale so it fits in the launcher width comfortably
+                pix = pix.scaledToWidth(520, Qt.TransformationMode.SmoothTransformation)
+                logo_label = QLabel()
+                logo_label.setPixmap(pix)
+                logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                logo_label.setStyleSheet("background:transparent")
+                v.addWidget(logo_label)
+            else:
+                self._add_text_header(v)
+        else:
+            self._add_text_header(v)
+        v.addSpacing(6)
+        choose = QLabel("Choose a module:")
+        choose.setStyleSheet("color:#e6edf3;font-size:10pt;background:transparent")
+        v.addWidget(choose)
+        # Mode buttons (no tooltips — labels are self-explanatory)
+        sim_btn = QPushButton("BCDI Simulation")
+        sim_btn.setStyleSheet(
+            "background:#238636;color:#fff;padding:14px;border-radius:6px;"
+            "font-size:11pt;font-weight:600;text-align:center"
+        )
+        sim_btn.setMinimumHeight(48)
+        sim_btn.clicked.connect(self._open_sim)
+        v.addWidget(sim_btn)
+        ana_btn = QPushButton("BCDI Data Analysis")
+        ana_btn.setStyleSheet(
+            "background:#1f6feb;color:#fff;padding:14px;border-radius:6px;"
+            "font-size:11pt;font-weight:600;text-align:center"
+        )
+        ana_btn.setMinimumHeight(48)
+        ana_btn.clicked.connect(self._open_analysis)
+        v.addWidget(ana_btn)
+        v.addSpacing(4)
+        # Exit button (smaller, red)
+        exit_btn = QPushButton("Exit")
+        exit_btn.setStyleSheet(
+            "background:#da3633;color:#fff;padding:8px;border-radius:5px;"
+            "font-size:10pt;font-weight:600"
+        )
+        exit_btn.clicked.connect(self._exit_app)
+        v.addWidget(exit_btn)
+        v.addStretch()
+        self.setCentralWidget(central)
+        # Software credit bottom-right (small grey)
+        self.credit = QLabel("Software developed by Soufiane SAIDI", self)
+        self.credit.setStyleSheet(
+            "color:#6e7681;font-size:8pt;background:transparent"
+        )
+        self.credit.adjustSize()
+        self._reposition_credit()
+    def _add_text_header(self, layout):
+        title = QLabel("CDI-ST")
+        title.setStyleSheet(
+            "color:#e6edf3;font-size:32pt;font-weight:700;"
+            "background:transparent;letter-spacing:2px"
+        )
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        sub = QLabel("Coherent Diffraction Imaging Simulation Tools")
+        sub.setStyleSheet("color:#8b949e;font-size:10pt;background:transparent")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(sub)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._reposition_credit()
+    def _reposition_credit(self):
+        if hasattr(self, 'credit'):
+            margin = 8
+            self.credit.move(
+                self.width() - self.credit.width() - margin,
+                self.height() - self.credit.height() - margin
+            )
+            self.credit.raise_()
+    def _open_sim(self):
+        if self.sim_window is None or not self.sim_window.isVisible():
+            self.sim_window = MW_Sim(); self.sim_window.show()
+        else:
+            self.sim_window.raise_(); self.sim_window.activateWindow()
+    def _open_analysis(self):
+        if self.analysis_window is None or not self.analysis_window.isVisible():
+            self.analysis_window = MW_Analysis(); self.analysis_window.show()
+        else:
+            self.analysis_window.raise_(); self.analysis_window.activateWindow()
+    def _exit_app(self):
+        if self.sim_window is not None: self.sim_window.close()
+        if self.analysis_window is not None: self.analysis_window.close()
+        QApplication.quit()
+
+MW=MW_Sim
+
 def main():
     app=QApplication(sys.argv);app.setStyle("Fusion");pal=QPalette()
     for r,c in[(QPalette.ColorRole.Window,"#0d1117"),(QPalette.ColorRole.WindowText,"#e6edf3"),(QPalette.ColorRole.Base,"#0d1117"),(QPalette.ColorRole.AlternateBase,"#161b22"),(QPalette.ColorRole.Text,"#e6edf3"),(QPalette.ColorRole.Button,"#21262d"),(QPalette.ColorRole.ButtonText,"#e6edf3"),(QPalette.ColorRole.Highlight,"#1f6feb"),(QPalette.ColorRole.HighlightedText,"#ffffff")]:
         pal.setColor(r,QColor(c))
-    app.setPalette(pal);app.setStyleSheet(QSS);win=MW();win.show();sys.exit(app.exec())
+    app.setPalette(pal);app.setStyleSheet(QSS)
+    sp=CDIStSplash();sp.show();app.processEvents()
+    for pct,msg in[(10,"Initializing Qt..."),(30,"Loading core modules..."),(55,"Loading NN modules..."),(80,"Preparing UI..."),(100,"Ready")]:
+        sp.set_progress(pct,msg);app.processEvents();time.sleep(0.18)
+    win=Launcher();win.show();sp.finish(win);sys.exit(app.exec())
 if __name__=="__main__": main()
