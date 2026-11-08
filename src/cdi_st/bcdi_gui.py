@@ -1,13 +1,12 @@
-"""bcdi_gui.py v7.0 — dislocation loops, CIF import, rect detector, presets, export, measure, NN reconstruction."""
 import sys,tempfile,os
 import numpy as np
 from collections import Counter
-from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer,QRect
-from PyQt6.QtGui import QPalette,QColor,QFont,QPixmap,QPainter,QFontMetrics,QBrush,QPen
+from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer
+from PyQt6.QtGui import QPalette,QColor,QFont
 from PyQt6.QtWidgets import (QApplication,QMainWindow,QWidget,QTabWidget,QVBoxLayout,QHBoxLayout,
     QFormLayout,QGridLayout,QGroupBox,QLabel,QPushButton,QComboBox,QSpinBox,QDoubleSpinBox,
     QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QProgressBar,QMessageBox,QStatusBar,
-    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog,QSplashScreen)
+    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog)
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView; _HAS_WEB=True
 except: _HAS_WEB=False
@@ -16,12 +15,11 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from .bcdi_core import (MATERIAL_PRESETS,DETECTOR_PRESETS,BCDIConfig,CrystalBuilder,ReflectionCalculator,
+from bcdi_core import (MATERIAL_PRESETS,DETECTOR_PRESETS,BCDIConfig,CrystalBuilder,ReflectionCalculator,
     BCDISimulator,DislocationConfig,DislocationLoopConfig,lattice_html_with_controls,bragg_html_with_controls,
-    add_experimental_noise,export_measurement,load_cif_as_preset,find_preset,default_shape_for_material,compatible_shapes)
-try:
-    from cdi_st.nn_gui_tabs import T_Gen,T4,T4_Sup,T5,T6;_HAS_NN=True
-except ImportError: _HAS_NN=False
+    add_experimental_noise,export_measurement,load_cif_as_preset,find_preset,default_shape_for_material,
+    compatible_shapes,cells_for_size_nm,to_frame)
+import facets
 
 QSS="""QMainWindow,QWidget{background:#0d1117;color:#e6edf3;font-family:'Segoe UI','Consolas',sans-serif;font-size:10pt}
 QTabWidget::pane{border:1px solid #30363d;background:#0d1117;top:-1px}QTabBar::tab{background:#161b22;color:#8b949e;padding:10px 22px;margin-right:2px;border:1px solid #30363d;border-bottom:none;border-top-left-radius:6px;border-top-right-radius:6px;font-weight:600;min-width:140px}QTabBar::tab:selected{background:#0d1117;color:#4f98a3;border-bottom:2px solid #4f98a3}QTabBar::tab:disabled{color:#30363d}
@@ -39,6 +37,15 @@ def _dbl(lo,hi,v,d,suf=""):
     s=QDoubleSpinBox();s.setRange(lo,hi);s.setDecimals(d);s.setValue(v);s.setMinimumWidth(100)
     if suf: s.setSuffix(suf)
     return s
+class _Sci(QLineEdit):
+    """Number field that accepts 1e9, 1.5e12 or a plain number."""
+    def __init__(self,v=1e9,w=110):
+        super().__init__(f'{v:g}');self.setMaximumWidth(w)
+    def value(self):
+        try: return float(self.text().strip().replace(' ',''))
+        except ValueError: return 0.0
+    def setValue(self,v): self.setText(f'{float(v):g}')
+
 def _nb():
     b=QPushButton("next >>");b.setEnabled(False);b.setFixedSize(QSize(80,28));b.setStyleSheet("background:#238636;font-size:9pt;padding:4px 10px;min-height:20px;font-weight:700");return b
 
@@ -68,148 +75,73 @@ class T1(QWidget):
     def __init__(self): super().__init__();self.builder=None;self.config=None;self._w=None;self._ui()
     def _ui(self):
         root=QHBoxLayout(self);root.setContentsMargins(10,10,10,10);root.setSpacing(10)
-        sc=QScrollArea();sc.setWidgetResizable(True);sc.setFixedWidth(520);inner=QWidget();ll=QVBoxLayout(inner);ll.setSpacing(6);ll.setContentsMargins(4,4,8,4)
+        split=QSplitter(Qt.Orientation.Horizontal)
+        sc=QScrollArea();sc.setWidgetResizable(True);sc.setMinimumWidth(340);inner=QWidget();ll=QVBoxLayout(inner);ll.setSpacing(6);ll.setContentsMargins(4,4,8,4)
         h=QHBoxLayout();t=QLabel("Material & Lattice");t.setStyleSheet("color:#4f98a3;font-size:13pt;font-weight:700");h.addWidget(t,1);self.nb=_nb();h.addWidget(self.nb);ll.addLayout(h)
         # Material with CIF import
         mb=QGroupBox("Material");mv=QVBoxLayout(mb);mv.setSpacing(4)
         r1=QHBoxLayout();r1.addWidget(QLabel("Preset:"));self.combo=QComboBox()
-        self.combo.setToolTip(
-            "Pre-configured materials. Each preset contains the lattice "
-            "constants (a, b, c, angles), space group, atomic basis, and "
-            "common BCDI reflections.\n"
-            "Includes: Si, Ge, Pt, Au, Cu, Pd, GaAs, GaN, SiC, ZnO,\n"
-            "BaTiO3, SrTiO3, Fe5GeTe2, V2O3, hexagonal/cubic polytypes,\n"
-            "and any custom .cif files you've loaded."
-        )
         for k in MATERIAL_PRESETS: self.combo.addItem(k)
         self.combo.currentTextChanged.connect(self._pc);r1.addWidget(self.combo,1);mv.addLayout(r1)
-        r2=QHBoxLayout();r2.addWidget(QLabel("Formula:"));self.fe=QLineEdit();self.fe.setPlaceholderText("e.g. Fe5GeTe2")
-        self.fe.setToolTip(
-            "Type a chemical formula (e.g. 'Si', 'GaAs', 'Fe5GeTe2'),\n"
-            "then click 'Match' to find the matching preset. Useful when\n"
-            "you know the formula but not the exact preset name."
-        )
-        r2.addWidget(self.fe,1)
-        mb2=QPushButton("Match");mb2.setStyleSheet("background:#4f98a3;padding:5px 10px;min-height:20px");mb2.setMaximumWidth(55)
-        mb2.setToolTip("Find the preset that matches the typed formula.")
-        mb2.clicked.connect(self._mt);r2.addWidget(mb2)
-        cif_btn=QPushButton("Load .cif");cif_btn.setStyleSheet("background:#1f6feb;padding:5px 10px;min-height:20px");cif_btn.setMaximumWidth(70)
-        cif_btn.setToolTip(
-            "Import a Crystallographic Information File (.cif) as a custom\n"
-            "material. The file is parsed for cell parameters, space group,\n"
-            "and atomic basis. The new preset becomes selectable in the dropdown."
-        )
-        cif_btn.clicked.connect(self._load_cif);r2.addWidget(cif_btn)
+        r2=QHBoxLayout();r2.addWidget(QLabel("Formula:"));self.fe=QLineEdit();self.fe.setPlaceholderText("e.g. Fe5GeTe2");r2.addWidget(self.fe,1)
+        mb2=QPushButton("Match");mb2.setStyleSheet("background:#4f98a3;padding:5px 10px;min-height:20px");mb2.setMaximumWidth(55);mb2.clicked.connect(self._mt);r2.addWidget(mb2)
+        cif_btn=QPushButton("Load .cif");cif_btn.setStyleSheet("background:#1f6feb;padding:5px 10px;min-height:20px");cif_btn.setMaximumWidth(70);cif_btn.clicked.connect(self._load_cif);r2.addWidget(cif_btn)
         mv.addLayout(r2);self.il=QLabel();self.il.setWordWrap(True);self.il.setStyleSheet("color:#8b949e;font-size:9pt");mv.addWidget(self.il);ll.addWidget(mb)
         # Supercell
         sb=QGroupBox("Supercell");sf=QFormLayout(sb);sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);sf.setVerticalSpacing(4)
         row=QHBoxLayout();self.nx=QSpinBox();self.ny=QSpinBox();self.nz=QSpinBox()
-        for s in(self.nx,self.ny,self.nz): s.setRange(1,2500);s.setValue(20);s.setMinimumWidth(55);s.valueChanged.connect(self._us)
-        self.nx.setToolTip(
-            "Number of unit cells along X axis. Sets the X dimension of\n"
-            "the particle: physical size = nx × a (lattice constant)."
-        )
-        self.ny.setToolTip(
-            "Number of unit cells along Y axis. Sets the Y dimension of\n"
-            "the particle: physical size = ny × b."
-        )
-        self.nz.setToolTip(
-            "Number of unit cells along Z axis. Sets the Z dimension of\n"
-            "the particle: physical size = nz × c."
-        )
+        for s in(self.nx,self.ny,self.nz): s.setRange(1,100000);s.setValue(20);s.setMinimumWidth(55);s.valueChanged.connect(self._us)
         row.addWidget(QLabel("nx"));row.addWidget(self.nx);row.addWidget(QLabel("ny"));row.addWidget(self.ny);row.addWidget(QLabel("nz"));row.addWidget(self.nz);row.addStretch()
-        sf.addRow("Cells:",row);self.shp=QComboBox()
-        self.shp.setToolTip(
-            "Particle shape carved from the rectangular supercell.\n"
-            "  • cube:        the whole box\n"
-            "  • sphere:       inscribed sphere\n"
-            "  • cylinder:     inscribed cylinder along Z\n"
-            "  • hexagonal_prism:  hexagonal cross-section\n"
-            "  • octahedron / dodecahedron: faceted shapes\n"
-            "Available shapes depend on the material's symmetry."
-        )
-        sf.addRow("Shape:",self.shp);self.sl=QLabel();self.sl.setStyleSheet("color:#8b949e;font-size:9pt");sf.addRow(self.sl);ll.addWidget(sb)
-        vr=QHBoxLayout();self.bc=QCheckBox("Bonds");self.bc.setToolTip("Draw atomic bonds (slows rendering with many atoms)")
-        vr.addWidget(self.bc);self.stc=QCheckBox("Strain");self.stc.setToolTip("Color atoms by local strain magnitude (if strain is enabled)")
-        vr.addWidget(self.stc);self.dvc=QCheckBox("Disloc. viz");self.dvc.setToolTip("Highlight atoms near the dislocation core")
-        vr.addWidget(self.dvc);vr.addStretch();ll.addLayout(vr)
+        sf.addRow("Cells:",row)
+        nmr=QHBoxLayout();self.size_nm=_dbl(0.5,20000,8,1," nm");nmr.addWidget(self.size_nm)
+        bn=QPushButton("set cells");bn.setMaximumWidth(80);bn.setStyleSheet("background:#4f98a3;padding:4px 8px;min-height:20px")
+        bn.clicked.connect(self._from_nm);nmr.addWidget(bn);nmr.addStretch();sf.addRow("Size:",nmr)
+        self.shp=QComboBox();self.shp.currentTextChanged.connect(self._shape_changed);sf.addRow("Shape:",self.shp)
+        fr=QHBoxLayout()
+        self.fac_on=QCheckBox();self.wulff=_dbl(0.5,2.5,1.15,2);self.wulff.setEnabled(False)
+        self.fac_lbl=QLabel("Facet multiplicities:")
+        for w in (self.fac_on,self.wulff,self.fac_lbl): w.setToolTip('Controls the balance between the flat faces (facets) of the crystal.\\n\\nReal crystals grow flat faces whose relative size depends on which face is\\nmost stable. This number is the distance to the square {100} faces divided\\nby the distance to the triangular {111} faces.\\n\\n   below 0.58   pure cube, only square faces\\n   around 1.15  truncated octahedron, the usual shape of FCC metals\\n                (aluminium, copper, gold)\\n   above 1.73   pure octahedron, only triangular faces\\n\\nIn between you get a mix: raising the number grows the triangular faces\\nand shrinks the square ones. Leave the box unticked to use the standard 1.15.')
+        self.fac_on.toggled.connect(self.wulff.setEnabled)
+        fr.addWidget(self.fac_on);fr.addWidget(self.wulff);fr.addStretch()
+        sf.addRow(self.fac_lbl,fr);self.sl=QLabel();self.sl.setStyleSheet("color:#8b949e;font-size:9pt");sf.addRow(self.sl);ll.addWidget(sb)
+        vb=QGroupBox("Visualization");vv=QHBoxLayout(vb);vv.setSpacing(10)
+        self.bc=QCheckBox("Bonds");self.bc.setToolTip("Draw a line between neighbouring atoms. Clear for small cells, slow above ~80k atoms.")
+        self.stc=QCheckBox("Strain");self.stc.setToolTip("Colour every atom by how far it sits from its ideal lattice site (inferno scale).")
+        self.dvc=QCheckBox("Dislocation");self.dvc.setToolTip("Dim the undisturbed lattice and colour only the displaced atoms, so the defect stands out.")
+        for w in (self.bc,self.stc,self.dvc): vv.addWidget(w)
+        vv.addStretch();ll.addWidget(vb)
         # Dislocation: line + loop tabs
         db=QGroupBox("Defects");dv=QVBoxLayout(db);dv.setSpacing(4)
         # Line dislocation
-        self.dck=QCheckBox("Line dislocation");self.dck.setToolTip(
-            "Add a single straight-line dislocation. The displacement field\n"
-            "follows Volterra elasticity (edge: Burgers vector ⊥ line, screw:\n"
-            "Burgers vector ∥ line, mixed: arbitrary angle)."
-        );dv.addWidget(self.dck)
+        self.dck=QCheckBox("Line dislocation");dv.addWidget(self.dck)
         self.df=QFrame();dg=QGridLayout(self.df);dg.setContentsMargins(2,2,2,2);dg.setHorizontalSpacing(8);dg.setVerticalSpacing(5)
-        self.dt=QComboBox();self.dt.addItems(["edge","screw","mixed"])
-        self.dt.setToolTip(
-            "Dislocation character:\n"
-            "  • edge:   Burgers vector perpendicular to line\n"
-            "  • screw:  Burgers vector parallel to line\n"
-            "  • mixed:  combination of both"
-        )
-        self.dd=QComboBox();self.dd.addItems(["Z","Y","X"])
-        self.dd.setToolTip("Direction of the dislocation line in crystal axes.")
+        self.dt=QComboBox();self.dt.addItems(["edge","screw","mixed"]);self.dd=QComboBox();self.dd.addItems(["Z","Y","X"])
         dg.addWidget(QLabel("Type:"),0,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dt,0,1);dg.addWidget(QLabel("Line:"),0,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dd,0,3)
-        self.dpx=_dbl(0,1,.5,3);self.dpx.setToolTip("X position of the dislocation core as a fraction (0-1) of the particle.")
-        self.dpy=_dbl(0,1,.5,3);self.dpy.setToolTip("Y position of the dislocation core as a fraction (0-1) of the particle.")
+        self.dpx=_dbl(0,1,.5,3);self.dpy=_dbl(0,1,.5,3)
         dg.addWidget(QLabel("X:"),1,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dpx,1,1);dg.addWidget(QLabel("Y:"),1,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dpy,1,3)
-        self.db_=_dbl(0,50,0,3," A");self.db_.setSpecialValueText("auto")
-        self.db_.setToolTip(
-            "Magnitude of the Burgers vector in Ångström.\n"
-            "Set to 0 (= 'auto') to use the lattice constant 'a'."
-        )
-        self.dnu=_dbl(0,.5,.3,3);self.dnu.setToolTip(
-            "Poisson's ratio ν. Controls the radial vs. tangential strain ratio\n"
-            "for edge/mixed dislocations. Typical metal: 0.3."
-        )
+        self.db_=_dbl(0,50,0,3," A");self.db_.setSpecialValueText("auto");self.dnu=_dbl(0,.5,.3,3)
         dg.addWidget(QLabel("|b|:"),2,0,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.db_,2,1);dg.addWidget(QLabel("nu:"),2,2,Qt.AlignmentFlag.AlignRight);dg.addWidget(self.dnu,2,3)
         self.df.setVisible(False);dv.addWidget(self.df);self.dck.toggled.connect(self.df.setVisible)
         # Loop dislocation
-        self.lck=QCheckBox("Dislocation loop (prismatic)")
-        self.lck.setToolTip(
-            "Add a prismatic dislocation loop (closed circular line dislocation).\n"
-            "Common defect in irradiated and quenched materials."
-        )
-        dv.addWidget(self.lck)
+        self.lck=QCheckBox("Dislocation loop (prismatic)");dv.addWidget(self.lck)
         self.lf=QFrame();lg=QGridLayout(self.lf);lg.setContentsMargins(2,2,2,2);lg.setHorizontalSpacing(8);lg.setVerticalSpacing(5)
-        self.lcx=_dbl(0,1,.5,3);self.lcx.setToolTip("X position of the loop center (fraction 0-1).")
-        self.lcy=_dbl(0,1,.5,3);self.lcy.setToolTip("Y position of the loop center (fraction 0-1).")
-        self.lcz=_dbl(0,1,.5,3);self.lcz.setToolTip("Z position of the loop center (fraction 0-1).")
+        self.lcx=_dbl(0,1,.5,3);self.lcy=_dbl(0,1,.5,3);self.lcz=_dbl(0,1,.5,3)
         lg.addWidget(QLabel("Cx:"),0,0,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcx,0,1);lg.addWidget(QLabel("Cy:"),0,2,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcy,0,3);lg.addWidget(QLabel("Cz:"),0,4,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lcz,0,5)
-        self.lr=_dbl(1,500,20,1," A");self.lr.setToolTip("Loop radius in Ångström.")
-        self.lb=_dbl(0,50,0,3," A");self.lb.setSpecialValueText("auto")
-        self.lb.setToolTip("Burgers vector magnitude in Ångström (= 'auto' uses 'a').")
-        self.ln=QComboBox();self.ln.addItems(["Z","Y","X"])
-        self.ln.setToolTip("Loop normal direction (the loop plane is perpendicular to this).")
-        self.lnu2=_dbl(0,.5,.3,3);self.lnu2.setToolTip("Poisson's ratio ν (typical metal: 0.3).")
+        self.lr=_dbl(1,500,20,1," A");self.lb=_dbl(0,50,0,3," A");self.lb.setSpecialValueText("auto");self.ln=QComboBox();self.ln.addItems(["Z","Y","X"]);self.lnu2=_dbl(0,.5,.3,3)
         lg.addWidget(QLabel("R:"),1,0,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lr,1,1);lg.addWidget(QLabel("|b|:"),1,2,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.lb,1,3);lg.addWidget(QLabel("N:"),1,4,Qt.AlignmentFlag.AlignRight);lg.addWidget(self.ln,1,5)
         self.lf.setVisible(False);dv.addWidget(self.lf);self.lck.toggled.connect(self.lf.setVisible)
         ll.addWidget(db)
         stb=QGroupBox("Analytical strain");stf=QFormLayout(stb);stf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);stf.setVerticalSpacing(4)
-        self.strc=QComboBox();self.strc.addItems(["none","radial_gradient","edge_dislocation","random"])
-        self.strc.setToolTip(
-            "Add a parameterized strain field on top of the rigid lattice:\n"
-            "  • none:              no strain (default)\n"
-            "  • radial_gradient:   strain grows from center outward\n"
-            "  • edge_dislocation:  Volterra edge-dislocation field\n"
-            "  • random:            Gaussian random field (smoothed)"
-        )
-        stf.addRow("Type:",self.strc)
-        self.strm=_dbl(0,.1,1e-4,6);self.strm.setToolTip(
-            "Peak strain magnitude (dimensionless). Typical BCDI: 1e-4 to 1e-3.\n"
-            "0 = no strain."
-        )
-        stf.addRow("eps:",self.strm);ll.addWidget(stb)
-        self.bb=QPushButton("Build & Visualize");self.bb.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt")
-        self.bb.setToolTip("Build the supercell, apply strain/dislocations, and render the 3D lattice.")
-        self.bb.clicked.connect(self._bd);ll.addWidget(self.bb)
-        self.pg=QProgressBar();ll.addWidget(self.pg);self.lg=QPlainTextEdit();self.lg.setReadOnly(True);self.lg.setMaximumHeight(65);ll.addWidget(self.lg);ll.addStretch();sc.setWidget(inner);root.addWidget(sc)
+        self.strc=QComboBox();self.strc.addItems(["none","radial_gradient","edge_dislocation","random"]);stf.addRow("Type:",self.strc)
+        self.strm=_dbl(0,.1,1e-4,6);stf.addRow("eps:",self.strm);ll.addWidget(stb)
+        self.bb=QPushButton("Build & Visualize");self.bb.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt");self.bb.clicked.connect(self._bd);ll.addWidget(self.bb)
+        self.pg=QProgressBar();ll.addWidget(self.pg);self.lg=QPlainTextEdit();self.lg.setReadOnly(True);self.lg.setMaximumHeight(65);ll.addWidget(self.lg);ll.addStretch();sc.setWidget(inner);split.addWidget(sc)
         right=QWidget();rv=QVBoxLayout(right);rv.setContentsMargins(0,0,0,0);rv.addWidget(QLabel("3D Lattice"))
         if _HAS_WEB: self.viz=QWebEngineView();self.viz.setHtml(_ph("Build lattice."))
         else: self.viz=QLabel("Need PyQt6-WebEngine")
-        self.viz.setMinimumHeight(500);rv.addWidget(self.viz,1);root.addWidget(right,1);self._pc(self.combo.currentText());self._us()
+        self.viz.setMinimumHeight(400);rv.addWidget(self.viz,1);split.addWidget(right)
+        split.setStretchFactor(0,0);split.setStretchFactor(1,1);split.setSizes([480,1000]);root.addWidget(split)
+        self._pc(self.combo.currentText());self._us()
     def _load_cif(self):
         path,_=QFileDialog.getOpenFileName(self,"Load CIF","","CIF files (*.cif);;All (*)")
         if not path: return
@@ -233,12 +165,23 @@ class T1(QWidget):
             r=find_preset(q)
             if r: self.combo.setCurrentText(r)
             else: QMessageBox.information(self,"No match",f"No preset for '{q}'. Try Load .cif")
+    def _from_nm(self):
+        try:
+            n=cells_for_size_nm(self.combo.currentText(),self.size_nm.value())
+            for w,v in zip((self.nx,self.ny,self.nz),n): w.blockSignals(True);w.setValue(v);w.blockSignals(False)
+            self._us()
+        except Exception as e: self.lg.appendPlainText(f"size: {e}")
+    def _shape_changed(self,t):
+        on=(t=='wulff')
+        for w in (self.fac_on,self.fac_lbl): w.setEnabled(on)
+        self.wulff.setEnabled(on and self.fac_on.isChecked())
     def _us(self):
         try:
             cfg=BCDIConfig(self.combo.currentText());cfg.SUPERCELL_MULT=(self.nx.value(),self.ny.value(),self.nz.value())
             sz=cfg.particle_size_nm;nc=self.nx.value()*self.ny.value()*self.nz.value();na=nc*len(cfg.BASIS_COORDS)
             f=lambda v:f"{v:.1f}nm" if v<100 else f"{v/1000:.3f}um"
-            self.sl.setText(f"-> {f(sz[0])} x {f(sz[1])} x {f(sz[2])}  {nc:,} cells  ~{na:,} atoms")
+            w="" if na<2_000_000 else ("   [heavy: minutes + GBs on most machines]" if na<2e7 else "   [very heavy: expect long build times]")
+            self.sl.setText(f"-> {f(sz[0])} x {f(sz[1])} x {f(sz[2])}  {nc:,} cells  ~{na:,} atoms{w}")
         except: self.sl.setText("")
     def _bd(self):
         n=self.combo.currentText()
@@ -251,6 +194,11 @@ class T1(QWidget):
         if self.lck.isChecked():
             lbv=self.lb.value() if self.lb.value()>0 else None
             cfg.DISLOCATION_LOOP=DislocationLoopConfig(center_frac=(self.lcx.value(),self.lcy.value(),self.lcz.value()),radius_angstrom=self.lr.value(),b_angstrom=lbv,normal=self.ln.currentText(),nu=self.lnu2.value())
+        cfg.WULFF_RATIO=self.wulff.value() if self.fac_on.isChecked() else 1.15
+        na=cfg.SUPERCELL_MULT[0]*cfg.SUPERCELL_MULT[1]*cfg.SUPERCELL_MULT[2]*len(cfg.BASIS_COORDS)
+        if na>10_000_000 and QMessageBox.question(self,"Large supercell",
+                f"~{na:,} atoms.\nBuild time and memory scale with this and depend on your machine.\nContinue?"
+                )!=QMessageBox.StandardButton.Yes: return
         self.config=cfg;self.bb.setEnabled(False);self.nb.setEnabled(False);self.pg.setValue(0);self.lg.clear()
         self._w=BW(cfg);self._w.progress.connect(self.pg.setValue);self._w.log.connect(self.lg.appendPlainText);self._w.done.connect(self._ok);self._w.failed.connect(self._fl);self._w.start()
     def _ok(self,b):
@@ -276,108 +224,47 @@ class T2(QWidget):
         mh=QHBoxLayout();mh.setSpacing(8);lc=QVBoxLayout();lc.setSpacing(4)
         # Beam
         bb=QGroupBox("X-ray beam");bf=QFormLayout(bb);bf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);bf.setVerticalSpacing(3)
-        self.keV=_dbl(.5,100,10,2," keV")
-        self.keV.setToolTip(
-            "X-ray photon energy in kilo-electron-volts.\n"
-            "Common BCDI beamline energies: 7–12 keV.\n"
-            "Higher energy → shorter wavelength → tighter 2θ angles."
-        )
-        self.keV.valueChanged.connect(self._ul);self.keV.valueChanged.connect(lambda:self._rt.start())
-        self.ll_=QLabel();self.ll_.setStyleSheet("color:#8b949e;font-size:9pt");self._ul()
-        self.pol=_dbl(0,1,1,2)
-        self.pol.setToolTip(
-            "Polarization factor (0 to 1).\n"
-            "1 = full horizontal polarization (typical synchrotron sigma-pol)\n"
-            "0 = no polarization correction."
-        )
-        self.bsz=_dbl(0.1,1000,1,1," um")
-        self.bsz.setToolTip(
-            "Incident beam size (FWHM) at the sample in micrometers.\n"
-            "Typical focused beam: 0.5–3 μm. Affects illumination function\n"
-            "in coherent diffraction simulation."
-        )
-        bf.addRow("Energy:",self.keV);bf.addRow("",self.ll_);bf.addRow("Pol:",self.pol);bf.addRow("Beam size:",self.bsz);lc.addWidget(bb)
+        self.keV=_dbl(.5,100,10,2," keV");self.keV.valueChanged.connect(self._ul);self.keV.valueChanged.connect(lambda:self._rt.start())
+        self.ll_=QLabel();self.ll_.setStyleSheet("color:#8b949e;font-size:9pt");self._ul();self.pol=_dbl(0,1,1,2);self.bsz=_dbl(0.1,1000,1,1," um")
+        self.nph=_Sci(1e9);self.nph.setToolTip("Photons in the simulated exposure. Type it as 1e9, 2.5e12 or a plain number.\n"
+            "Only applied when Poisson noise is ticked in the Results tab.")
+        self.phmode=QComboBox();self.phmode.addItems(["total","peak"])
+        bf.addRow("Energy:",self.keV);bf.addRow("",self.ll_);bf.addRow("Pol:",self.pol);bf.addRow("Beam size:",self.bsz)
+        bf.addRow("Photons:",self.nph);bf.addRow("counted as:",self.phmode);lc.addWidget(bb)
         # Detector with preset selector and NX x NY
         db=QGroupBox("Detector");dv=QVBoxLayout(db);dv.setSpacing(3)
         pr=QHBoxLayout();pr.addWidget(QLabel("Preset:"));self.det_combo=QComboBox()
-        self.det_combo.setToolTip(
-            "Pre-configured detector. Auto-fills pixel count and pixel size.\n"
-            "  • Maxipix (ID01):  516×516, 55 μm pixels\n"
-            "  • Eiger 2M:        1062×1028, 75 μm pixels\n"
-            "  • Custom:          set values manually"
-        )
         for k in DETECTOR_PRESETS: self.det_combo.addItem(k)
         self.det_combo.currentTextChanged.connect(self._det_preset);pr.addWidget(self.det_combo,1);dv.addLayout(pr)
         df=QFormLayout();df.setLabelAlignment(Qt.AlignmentFlag.AlignRight);df.setVerticalSpacing(3)
         self.det_d=_dbl(.05,10,.5,3," m")
-        self.det_d.setToolTip(
-            "Sample-to-detector distance in meters.\n"
-            "Determines q-space resolution: closer = smaller q range, farther =\n"
-            "finer q sampling. Typical BCDI: 0.5–2 m."
-        )
         # NX x NY row
-        pxr=QHBoxLayout();self.det_nx=QSpinBox();self.det_nx.setRange(32,4096);self.det_nx.setValue(128)
-        self.det_nx.setToolTip("Number of detector pixels in the horizontal (X) direction.")
-        pxr.addWidget(self.det_nx);pxr.addWidget(QLabel("x"));self.det_ny=QSpinBox();self.det_ny.setRange(32,4096);self.det_ny.setValue(128)
-        self.det_ny.setToolTip("Number of detector pixels in the vertical (Y) direction.")
-        pxr.addWidget(self.det_ny)
+        pxr=QHBoxLayout();self.det_nx=QSpinBox();self.det_nx.setRange(32,4096);self.det_nx.setValue(256)
+        pxr.addWidget(self.det_nx);pxr.addWidget(QLabel("x"));self.det_ny=QSpinBox();self.det_ny.setRange(32,4096);self.det_ny.setValue(256);pxr.addWidget(self.det_ny)
+        for _w in (self.det_nx,self.det_ny):
+            _w.setToolTip("Detector panel in pixels. Editing it by hand also sets the image size below.")
+            _w.valueChanged.connect(self._panel_edited)
         self.det_sz=_dbl(1,500,55,1," um")
-        self.det_sz.setToolTip(
-            "Physical pixel pitch in micrometers.\n"
-            "Maxipix: 55 μm.  Eiger 2M: 75 μm.\n"
-            "Smaller pixels → finer angular resolution per pixel."
-        )
         df.addRow("Distance:",self.det_d);df.addRow("Pixels:",pxr);df.addRow("Pixel size:",self.det_sz)
         # Rocking: "Steps" label (= number of rocking curve angular positions)
         self.rock=_dbl(.0001,1,.00315,5," deg");self.rock.setDecimals(5)
-        self.rock.setToolTip(
-            "Angular step size between rocking curve points, in degrees.\n"
-            "Sets the q-resolution along the rocking direction.\n"
-            "Typical: 0.001–0.01°. Smaller = finer rocking sampling but more frames."
-        )
         self.steps=QSpinBox();self.steps.setRange(8,2048);self.steps.setValue(128)
-        self.steps.setToolTip(
-            "Number of rocking curve points (i.e., number of detector frames\n"
-            "in the scan). Total rocking range = step × steps.\n"
-            "Typical: 50–200 for full Bragg peak coverage."
-        )
         df.addRow("Rock step:",self.rock);df.addRow("Steps:",self.steps)
         # Oversampling with tooltip
-        self.os=_dbl(1,20,5,1);self.os.setToolTip(
-            "Oversampling ratio: simulation grid = OS × Nyquist.\n"
-            "Higher = finer q-resolution but slower.\n"
-            "Typical BCDI: 3–8.  Reconstruction is only possible if OS > 2."
-        )
+        self.os=_dbl(1,20,5,1);self.os.setToolTip("Oversampling ratio: simulation grid = OS x Nyquist.\nHigher = finer q-resolution but slower.\nTypical BCDI: 3-8")
         os_row=QHBoxLayout();os_row.addWidget(self.os);os_lbl=QLabel("(oversampling)");os_lbl.setStyleSheet("color:#8b949e;font-size:8pt");os_row.addWidget(os_lbl)
         df.addRow("OS ratio:",os_row)
+        self.grid=QSpinBox();self.grid.setRange(32,512);self.grid.setValue(256)
+        self.grid.setToolTip("Pixels across the simulated image. More pixels sample each fringe more\n"
+            "finely, so the 2D slices get smoother with real data, not interpolation.\n"
+            "Oversampling follows automatically; override it below if you want.\n"
+            "Cost grows as N^3: 128 ~0.5 s, 256 ~5 s and ~1 GB, 384 ~16 s and ~3.6 GB.")
+        self.grid.valueChanged.connect(self._grid_changed)
+        df.addRow("Image size (px):",self.grid)
         dv.addLayout(df);lc.addWidget(db)
         # Coherence
         cb=QGroupBox("Coherence");cf=QFormLayout(cb);cf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);cf.setVerticalSpacing(3)
-        self.sh=_dbl(0,10000,300,1," um")
-        self.sh.setToolTip(
-            "Horizontal source size (FWHM) at the source point, in micrometers.\n"
-            "Affects horizontal transverse coherence at the sample.\n"
-            "Typical synchrotron: 100–500 μm. Set to 0 to disable coherence model."
-        )
-        self.sv=_dbl(0,10000,10,1," um")
-        self.sv.setToolTip(
-            "Vertical source size (FWHM) at the source point, in micrometers.\n"
-            "Affects vertical transverse coherence at the sample.\n"
-            "Typical synchrotron: 5–50 μm (smaller than H — synchrotrons are\n"
-            "vertically coherent by design)."
-        )
-        self.sd=_dbl(.1,500,50,1," m")
-        self.sd.setToolTip(
-            "Source-to-sample distance in meters.\n"
-            "Longer distance → better transverse coherence (larger coherence\n"
-            "length at the sample). Typical: 30–80 m."
-        )
-        self.bw=_dbl(1e-6,.1,1e-4,6);self.bw.setDecimals(6)
-        self.bw.setToolTip(
-            "Relative energy bandwidth ΔE/E of the monochromator.\n"
-            "Sets the longitudinal coherence length.\n"
-            "Si(111) monochromator: ~1.3×10⁻⁴.  Multilayer: 10⁻² to 10⁻³."
-        )
+        self.sh=_dbl(0,10000,300,1," um");self.sv=_dbl(0,10000,10,1," um");self.sd=_dbl(.1,500,50,1," m");self.bw=_dbl(1e-6,.1,1e-4,6);self.bw.setDecimals(6)
         cf.addRow("Src H:",self.sh);cf.addRow("Src V:",self.sv);cf.addRow("Src D:",self.sd);cf.addRow("dE/E:",self.bw);lc.addWidget(cb);lc.addStretch();mh.addLayout(lc)
         # Center: reflection chart
         cc=QVBoxLayout();cc.setSpacing(4);cc.addWidget(QLabel("Reflection intensities"))
@@ -390,13 +277,48 @@ class T2(QWidget):
         self.rt.setMinimumWidth(320);rc.addWidget(self.rt,1)
         hr=QHBoxLayout();hr.addWidget(QLabel("hkl:"));self.he=QLineEdit();self.he.setPlaceholderText("e.g. 1 1 1");hr.addWidget(self.he,1);rc.addLayout(hr)
         # Custom angle input
-        ar=QHBoxLayout();ar.addWidget(QLabel("Custom 2th:"));self.custom_angle=_dbl(0,180,0,3," deg");self.custom_angle.setSpecialValueText("auto");ar.addWidget(self.custom_angle,1);rc.addLayout(ar)
+        ar=QHBoxLayout();ar.addWidget(QLabel("Custom 2th:"))
+        self.custom_angle=_dbl(0,180,0,3," deg");self.custom_angle.setSpecialValueText("auto")
+        self.custom_angle.setToolTip("Park the detector away from the exact Bragg angle.\n"
+            "The peak moves off centre and the recorded intensity falls, exactly as it does\n"
+            "when you step off a rocking curve. Leave at 0 to sit on the Bragg condition.")
+        self.custom_angle.valueChanged.connect(self._ang_info);ar.addWidget(self.custom_angle,1);rc.addLayout(ar)
+        self.ang_lbl=QLabel("");self.ang_lbl.setWordWrap(True);self.ang_lbl.setStyleSheet("color:#8b949e;font-size:9pt");rc.addWidget(self.ang_lbl)
         mh.addLayout(rc,1);root.addLayout(mh,1)
         self.sb_=QPushButton("Simulate");self.sb_.setStyleSheet("background:#1f6feb;min-height:34px;font-size:11pt");self.sb_.setEnabled(False);self.sb_.clicked.connect(self._rn);root.addWidget(self.sb_)
         self.pg=QProgressBar();root.addWidget(self.pg);self.lg=QPlainTextEdit();self.lg.setReadOnly(True);self.lg.setMaximumHeight(55);root.addWidget(self.lg)
+        self._grid_changed(self.grid.value())
     def _det_preset(self,name):
+        """A preset describes the physical panel; it must not blow up the FFT grid."""
         if name in DETECTOR_PRESETS and name!='Custom':
-            d=DETECTOR_PRESETS[name];self.det_nx.setValue(d['nx']);self.det_ny.setValue(d['ny']);self.det_sz.setValue(d['pixel_um'])
+            d=DETECTOR_PRESETS[name];self._lock=True
+            self.det_nx.setValue(d['nx']);self.det_ny.setValue(d['ny']);self.det_sz.setValue(d['pixel_um'])
+            self._lock=False
+
+    def _panel_edited(self):
+        if getattr(self,'_lock',False): return
+        self.grid.setValue(min(max(self.det_nx.value(),self.det_ny.value()),self.grid.maximum()))
+
+    def _grid_changed(self,v):
+        # keep the displayed q-window fixed: finer pixels mean finer sampling
+        self.os.setValue(round(v/25.6,1))
+        if hasattr(self,'ang_lbl'): self._ang_info()
+    def _ang_info(self):
+        from bcdi_core import offset_report
+        t=self.custom_angle.value()
+        if self.config is None or t<=0.01 or self._rdf is None or not len(self._rdf):
+            self.ang_lbl.setText("");return
+        near=self._rdf.iloc[(self._rdf['2theta']-t).abs().argsort().iloc[0]]
+        off=t-near['2theta']
+        c=self.config;c.TARGET_OVERSAMPLING=self.os.value();c.DETECTOR_PIXEL_UM=self.det_sz.value()
+        c.SAMPLE_DETECTOR_DISTANCE_M=self.det_d.value();c.SIM_GRID_MAX=self.grid.value()
+        c.DETECTOR_NX=self.det_nx.value();c.DETECTOR_NY=self.det_ny.value()
+        dq,vox,pix,gone=offset_report(c,np.radians(near['theta_B']),off)
+        msg=(f"nearest {near['hkl_display']} at {near['2theta']:.3f} deg -> offset {off:+.3f} deg\n"
+             f"dq = {dq:+.4f} 1/A : peak moves {vox:+.1f} voxels ({pix:+.0f} real pixels)")
+        self.ang_lbl.setText(msg+("\n  peak leaves the simulated frame" if gone else ""))
+        self.ang_lbl.setStyleSheet("color:#f0883e;font-size:9pt" if gone else "color:#8b949e;font-size:9pt")
+
     def _ul(self): lam=BCDIConfig.HC_KEV_ANG/self.keV.value() if self.keV.value()>0 else 0;self.ll_.setText(f"lam = {lam:.4f} A")
     def _uc(self):
         if self.config is None: self.cl.setText("Build lattice first.");self.cl.setStyleSheet("color:#f0883e;font-weight:600");self.sb_.setEnabled(False)
@@ -418,7 +340,7 @@ class T2(QWidget):
             bcdi=df[df['BCDI_flag']]
             if len(bcdi): self.rt.selectRow(bcdi.index[0])
             elif len(df): self.rt.selectRow(0)
-            self._dc(df)
+            self._dc(df);self._ang_info()
         except Exception as e: self.lg.appendPlainText(f"Refl: {e}")
     def _dc(self,df):
         with matplotlib.rc_context(MPL_DARK):
@@ -443,8 +365,9 @@ class T2(QWidget):
         if self.config is None: return
         hkl=self._gh()
         if hkl=='BAD': return
-        c=self.config;c.BEAM_ENERGY_KEV=self.keV.value();c.POLARIZATION_FACTOR=self.pol.value();c.BEAM_SIZE_UM=self.bsz.value()
-        c.SAMPLE_DETECTOR_DISTANCE_M=self.det_d.value();c.DETECTOR_NX=self.det_nx.value();c.DETECTOR_NY=self.det_ny.value()
+        c=self.config;c.BEAM_ENERGY_KEV=self.keV.value();c.POLARIZATION_FACTOR=self.pol.value();c.BEAM_SIZE_UM=self.bsz.value();c.N_PHOTONS=self.nph.value();c.PHOTON_MODE=self.phmode.currentText()
+        c.DET_COUNTING=bool(DETECTOR_PRESETS.get(self.det_combo.currentText(),{}).get('counting',True))
+        c.SAMPLE_DETECTOR_DISTANCE_M=self.det_d.value();c.DETECTOR_NX=self.det_nx.value();c.DETECTOR_NY=self.det_ny.value();c.SIM_GRID_MAX=self.grid.value()
         c.DETECTOR_PIXEL_UM=self.det_sz.value();c.ROCKING_STEP_DEG=self.rock.value();c.ROCKING_STEPS=self.steps.value()
         c.SOURCE_SIZE_H_UM=self.sh.value();c.SOURCE_SIZE_V_UM=self.sv.value();c.SOURCE_DISTANCE_M=self.sd.value();c.MONOCHR_BANDWIDTH=self.bw.value();c.TARGET_OVERSAMPLING=self.os.value()
         self.lg.clear()
@@ -461,6 +384,11 @@ class T2(QWidget):
                 c.ANGULAR_OFFSET_DEG=0.0
         else:
             c.ANGULAR_OFFSET_DEG=0.0
+        if c.SIM_GRID_MAX>320 and QMessageBox.question(self,"Large image",
+                f"{c.SIM_GRID_MAX} px needs roughly {(c.SIM_GRID_MAX/384)**3*16:.0f} s and "
+                f"{(c.SIM_GRID_MAX/384)**3*3.6:.1f} GB on a typical machine.\nContinue?"
+                )!=QMessageBox.StandardButton.Yes:
+            self.sb_.setEnabled(True);return
         self.sb_.setEnabled(False);self.nb.setEnabled(False);self.pg.setValue(0);self.sim_req.emit({'config':c,'builder':self.builder,'hkl':hkl})
 
 # ======================= TAB 3 =======================
@@ -470,8 +398,16 @@ class T3(QWidget):
         root=QVBoxLayout(self);root.setContentsMargins(12,12,12,12);root.setSpacing(6)
         h=QHBoxLayout();h.addWidget(QLabel("Diffraction Results"));h.itemAt(0).widget().setStyleSheet("color:#4f98a3;font-size:13pt;font-weight:700")
         h.addSpacing(15);h.addWidget(QLabel("Effects:"));h.itemAt(2).widget().setStyleSheet("color:#8b949e;font-size:9pt")
-        self.np_=QCheckBox("Poisson");self.nr=QCheckBox("Readout");self.na=QCheckBox("Air");self.nd=QCheckBox("Dead")
-        for c in(self.np_,self.nr,self.na,self.nd): h.addWidget(c)
+        self.np_=QCheckBox("Poisson")
+        self.np_.setToolTip("Counting statistics for the photon budget set in the Beam tab.\n"
+            "Leave off to see the ideal pattern: weak fringes survive only at high photon counts.")
+        self.nr=QCheckBox("Readout");self.nr.setToolTip("Integrating (CCD/CMOS) detectors only. Photon-counting "
+            "detectors (EIGER, PILATUS, MAXIPIX, MERLIN, TIMEPIX) have no read noise.")
+        self.na=QCheckBox("Air");self.nd=QCheckBox("Dead px");self.nh=QCheckBox("Hot px")
+        for c in(self.np_,self.nr,self.na,self.nd,self.nh): h.addWidget(c)
+        h.addSpacing(12);h.addWidget(QLabel("Frame:"));h.itemAt(h.count()-1).widget().setStyleSheet("color:#8b949e;font-size:9pt")
+        self.frame=QComboBox();self.frame.addItems(["sample (lab, orthogonal q)","detector (raw, skewed)"])
+        self.frame.setMaximumWidth(190);self.frame.currentTextChanged.connect(lambda _:self._rr());h.addWidget(self.frame)
         self.rb=QPushButton("Re-render");self.rb.setEnabled(False);self.rb.setStyleSheet("background:#4f98a3;padding:4px 10px;min-height:20px;font-size:9pt");self.rb.clicked.connect(self._rr);h.addWidget(self.rb)
         h.addStretch();root.addLayout(h)
         self.il=QLabel("Run simulation.");self.il.setStyleSheet("color:#8b949e;font-size:9pt");root.addWidget(self.il)
@@ -480,7 +416,7 @@ class T3(QWidget):
         else: self.bv=QLabel("No WebEngine")
         self.bv.setMinimumWidth(520);ll.addWidget(self.bv,1);sp.addWidget(lp)
         rp=QWidget();rl=QVBoxLayout(rp);rl.setContentsMargins(0,0,0,0);rl.setSpacing(4);rl.addWidget(QLabel("2D Slices"))
-        with matplotlib.rc_context(MPL_DARK): self.f1=Figure(figsize=(5,3.4),dpi=150,tight_layout=True);self.f2=Figure(figsize=(5,3.4),dpi=150,tight_layout=True)
+        with matplotlib.rc_context(MPL_DARK): self.f1=Figure(figsize=(5,3.4),dpi=200,tight_layout={'pad':0.4});self.f2=Figure(figsize=(5,3.4),dpi=200,tight_layout={'pad':0.4})
         self.c1=FigureCanvas(self.f1);self.c2=FigureCanvas(self.f2)
         for c in(self.c1,self.c2):
             c.setMinimumHeight(230);fr=QFrame();fr.setFrameShape(QFrame.Shape.StyledPanel);fl=QVBoxLayout(fr);fl.setContentsMargins(0,0,0,0)
@@ -492,12 +428,19 @@ class T3(QWidget):
         self.exp_btn.setStyleSheet("background:#1f6feb;padding:8px 20px;min-height:28px");self.exp_btn.clicked.connect(self._export);eb.addWidget(self.exp_btn)
         eb.addStretch();root.addLayout(eb)
     def _gn(self):
-        o={}
-        if self.np_.isChecked(): o['poisson']=True
+        """None when nothing is ticked, so the ideal pattern is shown untouched."""
+        c=self._c;o={}
+        if self.np_.isChecked():
+            o['poisson']=True
+            o['n_photons']=getattr(c,'N_PHOTONS',0) if c is not None else 0
+            o['photon_mode']=getattr(c,'PHOTON_MODE','total') if c is not None else 'total'
         if self.nr.isChecked(): o['readout_noise']=5.0
         if self.na.isChecked(): o['air_scatter']=100.0
         if self.nd.isChecked(): o['dead_pixels_frac']=0.002
-        return o or None
+        if self.nh.isChecked(): o['hot_pixels_frac']=0.0005
+        if not o: return None
+        o.setdefault('poisson',False);o['counting']=bool(getattr(c,'DET_COUNTING',True))
+        return o
     def _rr(self):
         if self._s: self._di(self._s,self._r,self._c,self._gn())
     def _export(self):
@@ -505,433 +448,56 @@ class T3(QWidget):
         path,_=QFileDialog.getSaveFileName(self,"Export measurement","bcdi_measurement","NumPy (*.npz);;HDF5 (*.h5)")
         if not path: return
         try:
+            self._c.Q_FRAME='det' if self.frame.currentIndex()==1 else 'lab'
             export_measurement(self._s,self._r,self._c,path,self._gn());QMessageBox.information(self,"Exported",f"Saved to {path}")
         except Exception as e: QMessageBox.critical(self,"Export Error",str(e))
     def display(self,sim,refl,cfg): self._s=sim;self._r=refl;self._c=cfg;self.rb.setEnabled(True);self.exp_btn.setEnabled(True);self._di(sim,refl,cfg,self._gn())
     def _di(self,sim,refl,cfg,no):
-        self.il.setText(f"{cfg.MATERIAL_NAME} {refl['hkl_str']} lam={cfg.wavelength_angstrom:.3f}A 2th={np.degrees(refl['two_theta_rad']):.3f} beam={cfg.BEAM_SIZE_UM:.1f}um det={cfg.DETECTOR_NX}x{cfg.DETECTOR_NY}")
-        if _HAS_WEB:
-            try:
-                html=bragg_html_with_controls(sim,2,1e-4,no)
-                if html: f=tempfile.NamedTemporaryFile('w',suffix='.html',delete=False,encoding='utf-8');f.write(html);f.close();self.bv.load(QUrl.fromLocalFile(f.name))
-            except Exception as e: print(f"3D: {e}")
+        fl='detector frame (raw, skewed)' if self.frame.currentIndex()==1 else 'sample / lab frame (orthogonal q)'
+        self.nr.setEnabled(not bool(getattr(cfg,'DET_COUNTING',True)))
+        if not self.nr.isEnabled(): self.nr.setChecked(False)
+        self.il.setText(f"{cfg.MATERIAL_NAME} {refl['hkl_str']} lam={cfg.wavelength_angstrom:.3f}A "
+            f"2th={np.degrees(refl['two_theta_rad']):.3f} det={cfg.DETECTOR_NX}x{cfg.DETECTOR_NY} grid={cfg.DETECTOR_N_PIXELS}^3 "
+            f"photons={getattr(cfg,'N_PHOTONS',0):.3g} | {fl}")
         vol=sim.diff_volume.copy()
         if no: vol=add_experimental_noise(vol,**no)
+        vol,_=to_frame(sim,'det' if self.frame.currentIndex()==1 else 'lab',vol)
+        if _HAS_WEB:
+            try:
+                html=bragg_html_with_controls(sim,2,1e-4,None,vol=vol,frame_label=fl)
+                if html: f=tempfile.NamedTemporaryFile('w',suffix='.html',delete=False,encoding='utf-8');f.write(html);f.close();self.bv.load(QUrl.fromLocalFile(f.name))
+            except Exception as e: print(f"3D: {e}")
         qx=sim.q_grids['qx'];qy=sim.q_grids['qy'];qz=sim.q_grids['qz'];N=vol.shape[0];cn=N//2;lmx=np.log10(vol.max()+1.);lmn=max(0,lmx-6)
-        # Up-sample slice data with cubic spline interpolation BEFORE imshow.
-        # The simulation cube has unequal effective sampling per axis (the
-        # rocking direction may have fewer real samples than the detector
-        # axes), so a raw imshow shows blocky stripes. Zooming the 2D slice
-        # 4x with cubic interpolation gives a visually clean rendering
-        # without changing the underlying physics.
-        from scipy.ndimage import zoom as _zoom
-        zoom_factor = 4
         for fig,title,data,qh,qv,xl,yl in [(self.f1,"qx-qy",vol[:,:,cn],qx,qy,"qx","qy"),(self.f2,"qx-qz",vol[:,cn,:],qx,qz,"qx","qz")]:
             with matplotlib.rc_context(MPL_DARK):
-                fig.clear();ax=fig.add_subplot(111);ax.set_facecolor('#000005')
-                # Cubic interpolation in linear space first, then take log
-                data_smooth = _zoom(data, zoom_factor, order=3, mode='nearest')
-                # Clip to non-negative (cubic can over/undershoot)
-                data_smooth = np.maximum(data_smooth, 0)
-                ld=np.log10(data_smooth.T+1.)
-                im=ax.imshow(ld,origin='lower',cmap='jet',aspect='auto',extent=[qh[0],qh[-1],qv[0],qv[-1]],vmin=lmn,vmax=lmx,interpolation='bilinear')
+                fig.clear();ax=fig.add_subplot(111);ax.set_facecolor('#000005');ld=np.log10(data.T+1.)
+                im=ax.imshow(ld,origin='lower',cmap='jet',aspect='auto',extent=[qh[0],qh[-1],qv[0],qv[-1]],vmin=lmn,vmax=lmx,interpolation='nearest')
                 tA=cfg.particle_size_angstrom;dq=2*np.pi/np.mean(tA[:2]);qz_=8*dq;ax.set_xlim(-qz_,qz_);ax.set_ylim(-qz_,qz_)
-                div=make_axes_locatable(ax);cax=div.append_axes('right',size='4%',pad=.05);fig.colorbar(im,cax=cax)
-                ax.set_title(title,fontsize=9);ax.set_xlabel(xl,fontsize=8);ax.set_ylabel(yl,fontsize=8);ax.tick_params(labelsize=7)
+                div=make_axes_locatable(ax);cax=div.append_axes('right',size='2.5%',pad=.035)
+                cb=fig.colorbar(im,cax=cax);cb.set_label('intensity arb.',fontsize=6);cb.ax.tick_params(labelsize=5)
+                ax.set_title(f'{title}',fontsize=7)
+                ax.set_xlabel(xl+' (1/A)',fontsize=6);ax.set_ylabel(yl+' (1/A)',fontsize=6);ax.tick_params(labelsize=5)
         self.c1.draw();self.c2.draw()
 
-# ======================= REPORTS & SUGGESTIONS =======================
-class ReportsDialog(QWidget):
-    """Small dialog: user enters email and message, sent to saidisoufiane@hotmail.com"""
-    RECIPIENT = "saidisoufiane@hotmail.com"
-    def __init__(self,parent=None):
-        super().__init__(parent,Qt.WindowType.Dialog)
-        self.setWindowTitle("Reports & Suggestions");self.setFixedSize(480,360);self.setStyleSheet(QSS)
-        v=QVBoxLayout(self);v.setContentsMargins(16,16,16,16);v.setSpacing(10)
-        title=QLabel("Reports & Suggestions");title.setStyleSheet("color:#4f98a3;font-size:14pt;font-weight:700");v.addWidget(title)
-        info=QLabel("<span style='color:#8b949e;font-size:9pt'>"
-                    "Both fields are required. "
-                    "Your default mail client will open with the message ready to send."
-                    "</span>")
-        info.setWordWrap(True);v.addWidget(info)
-        v.addWidget(QLabel("Your email:"));self.email_le=QLineEdit();self.email_le.setPlaceholderText("you@example.com");v.addWidget(self.email_le)
-        v.addWidget(QLabel("Message:"));self.msg_te=QPlainTextEdit();self.msg_te.setPlaceholderText("Describe the issue or suggestion...");self.msg_te.setMinimumHeight(140);v.addWidget(self.msg_te,1)
-        self.status=QLabel("");self.status.setWordWrap(True);self.status.setStyleSheet("font-size:9pt");v.addWidget(self.status)
-        br=QHBoxLayout();br.addStretch()
-        cancel=QPushButton("Cancel");cancel.setStyleSheet("background:#30363d;padding:7px 14px");cancel.clicked.connect(self.close);br.addWidget(cancel)
-        send=QPushButton("Send");send.setStyleSheet("background:#238636;padding:7px 18px;font-weight:600");send.clicked.connect(self._send);br.addWidget(send)
-        v.addLayout(br)
-    def _validate_email(self,e):
-        import re
-        return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$",e))
-    def _send(self):
-        email=self.email_le.text().strip();msg=self.msg_te.toPlainText().strip()
-        if not email:
-            self.status.setText("<span style='color:#da3633'>Email is required.</span>");return
-        if not self._validate_email(email):
-            self.status.setText("<span style='color:#da3633'>Please enter a valid email address.</span>");return
-        if not msg:
-            self.status.setText("<span style='color:#da3633'>Message is required.</span>");return
-        # Open the user's default mail client via mailto:
-        import urllib.parse,webbrowser
-        subject=urllib.parse.quote(f"BCDI Software - Report from {email}")
-        body=urllib.parse.quote(f"From: {email}\n\n{msg}")
-        url=f"mailto:{self.RECIPIENT}?subject={subject}&body={body}"
-        try:
-            webbrowser.open(url,new=1)
-            self.status.setText(
-                f"<span style='color:#3fb950'>\u2713 Opening your mail client. "
-                f"Click 'Send' there to deliver the message to {self.RECIPIENT}.</span>"
-            )
-            QTimer.singleShot(2500,self.close)
-        except Exception as e:
-            # Fallback: copy mailto URL to clipboard
-            try:
-                cb=QApplication.clipboard();cb.setText(f"To: {self.RECIPIENT}\nFrom: {email}\n\n{msg}")
-                self.status.setText(
-                    f"<span style='color:#f0883e'>Could not open mail client automatically. "
-                    f"The message has been copied to clipboard \u2014 please paste it into "
-                    f"an email to {self.RECIPIENT}.</span>"
-                )
-            except Exception as e2:
-                self.status.setText(f"<span style='color:#da3633'>Failed: {e2}</span>")
-
-
-def _make_reports_button(parent):
-    """Create a small 'Reports & Suggestions' button anchored bottom-right.
-    Note: Qt treats `&` in button labels as a keyboard accelerator marker
-    (the next character becomes Alt+letter). To display a literal `&`,
-    we use `&&`."""
-    btn=QPushButton("Reports && Suggestions",parent)
-    # 60% smaller than the previous version: smaller padding, smaller font, smaller height
-    btn.setStyleSheet(
-        "background:#1f6feb;color:#fff;padding:1px 6px;border-radius:3px;"
-        "font-size:7pt;font-weight:600;border:none"
-    )
-    btn.setToolTip("Send feedback or report a bug")
-    btn.setFixedHeight(16)
-    btn.adjustSize()
-    btn._dialog=None
-    def _open():
-        if btn._dialog is None or not btn._dialog.isVisible():
-            btn._dialog=ReportsDialog(parent)
-        btn._dialog.show();btn._dialog.raise_();btn._dialog.activateWindow()
-    btn.clicked.connect(_open)
-    return btn
-
-
-# ======================= SIMULATION WINDOW =======================
-class MW_Sim(QMainWindow):
-    """Simulation-only window: Material, Beam, Results tabs (no numbering)."""
-    def __init__(self,parent=None):
-        super().__init__(parent);self.setWindowTitle("BCDI Simulation");self.resize(1500,960);self.setMinimumSize(1200,800)
-        central=QWidget();vl=QVBoxLayout(central);vl.setContentsMargins(0,0,0,0);vl.setSpacing(0)
-        self.tabs=QTabWidget();self.tabs.setDocumentMode(True)
-        self.t1=T1();self.t2=T2();self.t3=T3()
-        self.tabs.addTab(self.t1,"Material");self.tabs.addTab(self.t2,"Beam");self.tabs.addTab(self.t3,"Results")
-        self.tabs.setTabEnabled(1,False);self.tabs.setTabEnabled(2,False)
-        vl.addWidget(self.tabs,1)
-        self.setCentralWidget(central)
-        sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Build a lattice to begin.")
+# ======================= MAIN =======================
+class MW(QMainWindow):
+    def __init__(self):
+        super().__init__();self.setWindowTitle("BCDI Simulator v6.0");self.resize(1500,960);self.setMinimumSize(1200,800)
+        self.tabs=QTabWidget();self.tabs.setDocumentMode(True);self.t1=T1();self.t2=T2();self.t3=T3()
+        self.tabs.addTab(self.t1," 1 Material ");self.tabs.addTab(self.t2," 2 Beam ");self.tabs.addTab(self.t3," 3 Results ")
+        self.tabs.setTabEnabled(1,False);self.tabs.setTabEnabled(2,False);self.setCentralWidget(self.tabs)
+        sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Build lattice first.")
         self.t1.built.connect(self._ob);self.t1.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(1))
-        self.t2.sim_req.connect(self._os);self.t2.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(2))
-        self._sw=None
-        # Reports button bottom-right
-        self.report_btn=_make_reports_button(self)
-        self._reposition_reports()
-    def resizeEvent(self,e):
-        super().resizeEvent(e);self._reposition_reports()
-    def _reposition_reports(self):
-        if hasattr(self,'report_btn'):
-            margin=10;sb_h=self.statusBar().height() if self.statusBar() else 0
-            self.report_btn.move(self.width()-self.report_btn.width()-margin,
-                                  self.height()-self.report_btn.height()-sb_h-margin)
-            self.report_btn.raise_()
+        self.t2.sim_req.connect(self._os);self.t2.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(2));self._sw=None
     def _ob(self,c,b): self.t2.sc(c,b);self.tabs.setTabEnabled(1,True)
     def _os(self,p):
         self._sw=SW(p['config'],p['builder'],p['hkl']);self._sw.progress.connect(self.t2.pg.setValue);self._sw.log.connect(self.t2.lg.appendPlainText)
         self._sw.done.connect(self._sd);self._sw.failed.connect(self._sf);self._sw.start()
     def _sd(self,s,r,d): self.t2.sb_.setEnabled(True);self.t2.nb.setEnabled(True);self.t3.display(s,r,s.config);self.tabs.setTabEnabled(2,True)
     def _sf(self,m): self.t2.sb_.setEnabled(True);self.t2.lg.appendPlainText(f"FAIL: {m}")
-
-
-# ======================= DATA ANALYSIS WINDOW =======================
-class MW_Analysis(QMainWindow):
-    """Data analysis window: Generate Data, AutoPhaseNN, CDI NN, Reconstruction, 3D Viewer."""
-    def __init__(self,parent=None):
-        super().__init__(parent);self.setWindowTitle("BCDI Data Analysis");self.resize(1500,960);self.setMinimumSize(1200,800)
-        if not _HAS_NN:
-            QMessageBox.critical(self,"Missing module",
-                "The data analysis module (nn_gui_tabs) is not available. "
-                "Make sure all NN-related files are present.")
-            QTimer.singleShot(0,self.close);return
-        central=QWidget();vl=QVBoxLayout(central);vl.setContentsMargins(0,0,0,0);vl.setSpacing(0)
-        self.tabs=QTabWidget();self.tabs.setDocumentMode(True)
-        self.tg=T_Gen();self.t4=T4();self.t4s=T4_Sup();self.t5=T5();self.t6=T6()
-        self.tabs.addTab(self.tg,"Generate Data")
-        self.tabs.addTab(self.t4,"AutoPhase_NN")
-        self.tabs.addTab(self.t4s,"CDI_NN")
-        self.tabs.addTab(self.t5,"Reconstruction")
-        self.tabs.addTab(self.t6,"3D Viewer")
-        self.t5.recon_done.connect(self.t6.set_result)
-        vl.addWidget(self.tabs,1)
-        self.setCentralWidget(central)
-        sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Generate training data, train models, then run reconstruction.")
-        # Reports button bottom-right
-        self.report_btn=_make_reports_button(self)
-        self._reposition_reports()
-    def resizeEvent(self,e):
-        super().resizeEvent(e);self._reposition_reports()
-    def _reposition_reports(self):
-        if hasattr(self,'report_btn'):
-            margin=10;sb_h=self.statusBar().height() if self.statusBar() else 0
-            self.report_btn.move(self.width()-self.report_btn.width()-margin,
-                                  self.height()-self.report_btn.height()-sb_h-margin)
-            self.report_btn.raise_()
-
-
-# ======================= LAUNCHER (small first window) =======================
-class Launcher(QMainWindow):
-    """Launcher window with the CDI-ST logo + two mode buttons + Exit."""
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("CDI-ST")
-        # Sized so the 678x340 logo fits at a reasonable scale
-        self.setFixedSize(560, 540)
-        self.sim_window = None
-        self.analysis_window = None
-        central = QWidget()
-        central.setStyleSheet("background:#0d1117")
-        v = QVBoxLayout(central)
-        v.setContentsMargins(20, 16, 20, 14)
-        v.setSpacing(12)
-        # Logo image at the top (matches splash screen)
-        logo = _logo_path()
-        if logo is not None:
-            pix = QPixmap(logo)
-            if not pix.isNull():
-                # Scale so it fits in the launcher width comfortably
-                pix = pix.scaledToWidth(520, Qt.TransformationMode.SmoothTransformation)
-                logo_label = QLabel()
-                logo_label.setPixmap(pix)
-                logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                logo_label.setStyleSheet("background:transparent")
-                v.addWidget(logo_label)
-            else:
-                self._add_text_header(v)
-        else:
-            self._add_text_header(v)
-        v.addSpacing(6)
-        choose = QLabel("Choose a module:")
-        choose.setStyleSheet("color:#e6edf3;font-size:10pt;background:transparent")
-        v.addWidget(choose)
-        # Mode buttons (no tooltips — labels are self-explanatory)
-        sim_btn = QPushButton("BCDI Simulation")
-        sim_btn.setStyleSheet(
-            "background:#238636;color:#fff;padding:14px;border-radius:6px;"
-            "font-size:11pt;font-weight:600;text-align:center"
-        )
-        sim_btn.setMinimumHeight(48)
-        sim_btn.clicked.connect(self._open_sim)
-        v.addWidget(sim_btn)
-        ana_btn = QPushButton("BCDI Data Analysis")
-        ana_btn.setStyleSheet(
-            "background:#1f6feb;color:#fff;padding:14px;border-radius:6px;"
-            "font-size:11pt;font-weight:600;text-align:center"
-        )
-        ana_btn.setMinimumHeight(48)
-        ana_btn.clicked.connect(self._open_analysis)
-        v.addWidget(ana_btn)
-        v.addSpacing(4)
-        # Exit button (smaller, red)
-        exit_btn = QPushButton("Exit")
-        exit_btn.setStyleSheet(
-            "background:#da3633;color:#fff;padding:8px;border-radius:5px;"
-            "font-size:10pt;font-weight:600"
-        )
-        exit_btn.clicked.connect(self._exit_app)
-        v.addWidget(exit_btn)
-        v.addStretch()
-        self.setCentralWidget(central)
-        # Software credit bottom-right (small grey)
-        self.credit = QLabel("Software developed by Soufiane SAIDI", self)
-        self.credit.setStyleSheet(
-            "color:#6e7681;font-size:8pt;background:transparent"
-        )
-        self.credit.adjustSize()
-        self._reposition_credit()
-    def _add_text_header(self, layout):
-        """Fallback header if the logo image is missing — text only."""
-        title = QLabel("CDI-ST")
-        title.setStyleSheet(
-            "color:#e6edf3;font-size:32pt;font-weight:700;"
-            "background:transparent;letter-spacing:2px"
-        )
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-        sub = QLabel("Coherent Diffraction Imaging Simulation Tools")
-        sub.setStyleSheet("color:#8b949e;font-size:10pt;background:transparent")
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(sub)
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._reposition_credit()
-    def _reposition_credit(self):
-        if hasattr(self, 'credit'):
-            margin = 8
-            self.credit.move(
-                self.width() - self.credit.width() - margin,
-                self.height() - self.credit.height() - margin
-            )
-            self.credit.raise_()
-    def _open_sim(self):
-        if self.sim_window is None or not self.sim_window.isVisible():
-            self.sim_window = MW_Sim(); self.sim_window.show()
-        else:
-            self.sim_window.raise_(); self.sim_window.activateWindow()
-    def _open_analysis(self):
-        if self.analysis_window is None or not self.analysis_window.isVisible():
-            self.analysis_window = MW_Analysis(); self.analysis_window.show()
-        else:
-            self.analysis_window.raise_(); self.analysis_window.activateWindow()
-    def _exit_app(self):
-        if self.sim_window is not None: self.sim_window.close()
-        if self.analysis_window is not None: self.analysis_window.close()
-        QApplication.quit()
-
-
-# ======================= SPLASH SCREEN =======================
-def _logo_path():
-    """Return the path to the CDI-ST logo, looking in several plausible places."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "CDI_ST_logo.png"),
-        os.path.join(here, "CDI_NN_logo.png"),
-        os.path.join(here, "logo.png"),
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return None
-
-
-class CDIStSplash(QSplashScreen):
-    """
-    Splash screen showing the CDI-ST logo with a loading bar underneath.
-    Matches the dark theme of the rest of the application.
-    """
-    def __init__(self):
-        # Build the splash pixmap: logo image + space below for loading bar
-        logo = _logo_path()
-        if logo is not None:
-            base_pix = QPixmap(logo)
-            if base_pix.isNull():
-                base_pix = self._fallback_pixmap()
-        else:
-            base_pix = self._fallback_pixmap()
-        # Scale to a reasonable splash size if needed
-        if base_pix.width() > 700:
-            base_pix = base_pix.scaledToWidth(700, Qt.TransformationMode.SmoothTransformation)
-        # Create a final pixmap with extra space for the loading bar + status text
-        BAR_H = 64  # extra height below the logo for bar + text
-        full = QPixmap(base_pix.width(), base_pix.height() + BAR_H)
-        full.fill(QColor("#0d1117"))   # dark background matching app theme
-        p = QPainter(full)
-        p.drawPixmap(0, 0, base_pix)
-        p.end()
-        super().__init__(full, Qt.WindowType.WindowStaysOnTopHint)
-        self.setFixedSize(full.size())
-        self._logo_h = base_pix.height()
-        self._bar_h = BAR_H
-        self._progress = 0
-        self._status = "Loading..."
-        # Loading bar overlay (drawn in drawContents)
-    def _fallback_pixmap(self):
-        """If the logo file is missing, build a simple text-based banner."""
-        pix = QPixmap(640, 280)
-        pix.fill(QColor("#0d1117"))
-        p = QPainter(pix)
-        # Title
-        p.setPen(QColor("#e6edf3"))
-        f = QFont(); f.setPointSize(48); f.setBold(True); f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 4)
-        p.setFont(f)
-        p.drawText(QRect(0, 50, 640, 80), Qt.AlignmentFlag.AlignCenter, "CDI-ST")
-        # Subtitle
-        p.setPen(QColor("#8b949e"))
-        f2 = QFont(); f2.setPointSize(13)
-        p.setFont(f2)
-        p.drawText(QRect(0, 150, 640, 30), Qt.AlignmentFlag.AlignCenter,
-                   "Coherent Diffraction Imaging Simulation Tools")
-        p.end()
-        return pix
-    def set_progress(self, value, status=""):
-        self._progress = max(0, min(100, int(value)))
-        if status:
-            self._status = status
-        self.repaint()
-    def drawContents(self, painter):
-        # Draw loading bar + status text in the strip below the logo
-        w = self.width()
-        bar_y_top = self._logo_h + 18
-        bar_x = 40
-        bar_w = w - 80
-        bar_h = 8
-        # Track
-        painter.setBrush(QBrush(QColor("#161b22")))
-        painter.setPen(QPen(QColor("#30363d"), 1))
-        painter.drawRoundedRect(bar_x, bar_y_top, bar_w, bar_h, 3, 3)
-        # Filled portion
-        if self._progress > 0:
-            painter.setBrush(QBrush(QColor("#4f98a3")))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(bar_x, bar_y_top, int(bar_w * self._progress / 100.0), bar_h, 3, 3)
-        # Status text
-        painter.setPen(QColor("#8b949e"))
-        f = QFont(); f.setPointSize(9)
-        painter.setFont(f)
-        painter.drawText(
-            QRect(bar_x, bar_y_top + bar_h + 6, bar_w, 18),
-            Qt.AlignmentFlag.AlignCenter,
-            self._status
-        )
-
-
-# ======================= MAIN =======================
 def main():
-    app = QApplication(sys.argv); app.setStyle("Fusion"); pal = QPalette()
-    for r, c in [(QPalette.ColorRole.Window, "#0d1117"),
-                 (QPalette.ColorRole.WindowText, "#e6edf3"),
-                 (QPalette.ColorRole.Base, "#0d1117"),
-                 (QPalette.ColorRole.AlternateBase, "#161b22"),
-                 (QPalette.ColorRole.Text, "#e6edf3"),
-                 (QPalette.ColorRole.Button, "#21262d"),
-                 (QPalette.ColorRole.ButtonText, "#e6edf3"),
-                 (QPalette.ColorRole.Highlight, "#1f6feb"),
-                 (QPalette.ColorRole.HighlightedText, "#ffffff")]:
-        pal.setColor(r, QColor(c))
-    app.setPalette(pal); app.setStyleSheet(QSS)
-    # Show splash screen first
-    splash = CDIStSplash()
-    splash.show(); app.processEvents()
-    # Simulate a few-stage loading sequence so the user sees the bar fill
-    import time
-    stages = [
-        (10, "Initializing Qt..."),
-        (30, "Loading core modules..."),
-        (55, "Loading NN modules..."),
-        (80, "Preparing UI..."),
-        (100, "Ready"),
-    ]
-    for pct, msg in stages:
-        splash.set_progress(pct, msg)
-        app.processEvents()
-        time.sleep(0.18)
-    # Build and show launcher
-    win = Launcher()
-    win.show()
-    splash.finish(win)
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
+    app=QApplication(sys.argv);app.setStyle("Fusion");pal=QPalette()
+    for r,c in[(QPalette.ColorRole.Window,"#0d1117"),(QPalette.ColorRole.WindowText,"#e6edf3"),(QPalette.ColorRole.Base,"#0d1117"),(QPalette.ColorRole.AlternateBase,"#161b22"),(QPalette.ColorRole.Text,"#e6edf3"),(QPalette.ColorRole.Button,"#21262d"),(QPalette.ColorRole.ButtonText,"#e6edf3"),(QPalette.ColorRole.Highlight,"#1f6feb"),(QPalette.ColorRole.HighlightedText,"#ffffff")]:
+        pal.setColor(r,QColor(c))
+    app.setPalette(pal);app.setStyleSheet(QSS);win=MW();win.show();sys.exit(app.exec())
+if __name__=="__main__": main()

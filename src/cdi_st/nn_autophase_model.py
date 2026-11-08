@@ -1,47 +1,11 @@
-"""
-nn_autophase_model.py — Physics-aware dual-decoder network for BCDI.
-
-Merges AutoPhaseNN (Yao et al., npj Comp Mat 2022) architecture with your
-existing U-Net backbone. Key differences from nn_phase_model.py:
-
-    1. TWO decoder heads — one for amplitude, one for phase
-       (previously: one head for phase only)
-
-    2. Physics-enforcing activations:
-       - amplitude: sigmoid → [0, 1]
-       - phase: tanh × π → [-π, π]
-
-    3. Zero-padding support layer:
-       The amplitude is padded to N/2 in each dimension, enforcing the
-       oversampling requirement for phase retrieval (Miao 2000).
-       This means the reconstructed object is automatically confined
-       to half the grid in each direction.
-
-    4. Shape support constraint:
-       During the forward model, amplitude is thresholded at 10% max
-       to create a dynamic support mask.
-
-Trained with the physics-aware unsupervised loss in nn_autophase_train.py:
-no ground-truth phase or amplitude needed, only diffraction intensity.
-
-Reference:
-    Yao et al., "AutoPhaseNN: unsupervised physics-aware deep learning of 3D
-    nanoscale Bragg coherent diffraction imaging", npj Comp. Mat. 8, 124 (2022).
-"""
-
 from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Building blocks (compatible with your nn_phase_model.py conventions)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class ConvBlock3D(nn.Module):
-    """Two 3×3×3 convolutions with InstanceNorm + LeakyReLU."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.conv = nn.Sequential(
@@ -58,7 +22,7 @@ class ConvBlock3D(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """Downsample 2× via strided conv, then ConvBlock3D."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.down = nn.Conv3d(in_ch, in_ch, 2, stride=2, bias=False)
@@ -79,15 +43,8 @@ class UpBlock(nn.Module):
         return self.conv(torch.cat([x, skip], dim=1))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Decoder heads (one per output: amplitude and phase)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class DecoderBranch(nn.Module):
-    """
-    One decoder branch: takes the bottleneck + skip connections,
-    produces a single-channel output with custom final activation.
-    """
+
     def __init__(self, base_channels: int, activation: str):
         super().__init__()
         C = base_channels
@@ -121,33 +78,7 @@ class DecoderBranch(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class AutoPhaseNet3D(nn.Module):
-    """
-    Dual-decoder 3D U-Net predicting both amplitude and phase.
 
-    Input:
-        diffraction magnitude (log-normalized), shape [B, 1, N, N, N]
-
-    Outputs:
-        amplitude, shape [B, 1, N, N, N]  ∈ [0, 1]
-        phase, shape     [B, 1, N, N, N]  ∈ [-1, 1] (multiply by π for radians)
-
-    Architecture (base_channels=32, N=64):
-
-        Input → ConvBlock(32) → DownBlock(64) → DownBlock(128) → Bottleneck(256)
-                     ↓                ↓              ↓
-                     s1               s2             s3
-                     ↓                ↓              ↓
-        ┌──── Amp decoder: UpBlocks(128,64,32) → 1×1 conv → sigmoid ──→ amplitude
-        │
-        └──── Phase decoder: UpBlocks(128,64,32) → 1×1 conv → tanh ───→ phase
-
-    Parameters: ~2.3M at base_channels=32
-
-    Zero-padding support:
-        If enforce_oversampling=True, the amplitude is zeroed outside a central
-        N/2 × N/2 × N/2 region. This implements the Miao oversampling condition
-        as a hard constraint, matching AutoPhaseNN's zero-padding layers.
-    """
 
     def __init__(
         self,
@@ -170,12 +101,7 @@ class AutoPhaseNet3D(nn.Module):
         self.phase_decoder = DecoderBranch(C, activation='tanh')
 
     def _zero_pad_mask(self, shape, device):
-        """
-        Create a central-N/2 support mask (zero-padding layer, AutoPhaseNN §3.1).
 
-        This enforces the oversampling constraint: the real-space object must
-        fit inside half the grid in each dimension.
-        """
         B, _, N1, N2, N3 = shape
         mask = torch.zeros((1, 1, N1, N2, N3), device=device)
         q1, q2, q3 = N1 // 4, N2 // 4, N3 // 4
@@ -183,17 +109,7 @@ class AutoPhaseNet3D(nn.Module):
         return mask
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Parameters
-        ----------
-        x : tensor [B, 1, N, N, N]
-            Log-normalized diffraction magnitude.
 
-        Returns
-        -------
-        amplitude : tensor [B, 1, N, N, N]  ∈ [0, 1]
-        phase     : tensor [B, 1, N, N, N]  ∈ [-1, 1]  (multiply by π for radians)
-        """
         # Shared encoder
         s1 = self.enc1(x)                  # [B, C, N, N, N]
         s2 = self.enc2(s1)                 # [B, 2C, N/2, N/2, N/2]
@@ -212,25 +128,8 @@ class AutoPhaseNet3D(nn.Module):
         return amplitude, phase
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Physics forward model (used during training)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class PhysicsForwardModel(nn.Module):
-    """
-    X-ray scattering forward model (AutoPhaseNN §Methods).
 
-    Given predicted (amplitude, phase), forms the complex object, applies a
-    dynamic shape support derived from the amplitude itself, and returns the
-    predicted diffraction magnitude.
-
-    This module has NO trainable parameters — it purely implements physics:
-        ρ(r) = A(r) · exp(i · φ(r)) · S(r)
-        F(q) = FFT[ ρ(r) ]
-        |F(q)| = |FFT[ ρ(r) ]|
-
-    where S(r) is a shape support computed by thresholding A(r) at `threshold`.
-    """
 
     def __init__(self, threshold: float = 0.1):
         super().__init__()
@@ -241,17 +140,7 @@ class PhysicsForwardModel(nn.Module):
         amplitude: torch.Tensor,
         phase: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Parameters
-        ----------
-        amplitude : [B, 1, N, N, N]   ∈ [0, 1]
-        phase     : [B, 1, N, N, N]   ∈ [-1, 1]
 
-        Returns
-        -------
-        pred_diff_mag : [B, 1, N, N, N]   predicted diffraction magnitude
-        shape_support : [B, 1, N, N, N]   dynamic support (for regularization)
-        """
         # 1. Dynamic shape support by thresholding amplitude
         # Use a soft threshold (sigmoid) so it stays differentiable
         amp_max = amplitude.amax(dim=(2, 3, 4), keepdim=True).clamp(min=1e-6)
@@ -276,27 +165,8 @@ class PhysicsForwardModel(nn.Module):
         return pred_diff_mag, shape_support
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Unsupervised loss (AutoPhaseNN's MAE on sqrt(intensity))
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class UnsupervisedBCDILoss(nn.Module):
-    """
-    Physics-aware unsupervised loss (Eq. 1 in AutoPhaseNN paper):
 
-        Loss = Σ |√I_estimated − √I_measured|  /  N³
-
-    That is: mean absolute error on the diffraction AMPLITUDE (sqrt of
-    intensity). Using sqrt compresses the high dynamic range (the center of
-    the Bragg peak can be 10⁶× brighter than the fringes) and gives the
-    fringes comparable weight to the peak.
-
-    Optional regularizers:
-        - support_smoothness : penalty on gradients of the shape support
-          (discourages fragmented reconstructions)
-        - tv_phase : total-variation on phase inside the support
-          (encourages smooth strain fields)
-    """
 
     def __init__(
         self,
@@ -315,17 +185,7 @@ class UnsupervisedBCDILoss(nn.Module):
         phase: torch.Tensor = None,
         shape_support: torch.Tensor = None,
     ) -> dict:
-        """
-        Parameters
-        ----------
-        pred_diff_mag     : [B, 1, N, N, N]  predicted |F(q)|
-        measured_diff_mag : [B, 1, N, N, N]  measured  |F(q)|
-        amplitude, phase, shape_support : optional, for regularizers
 
-        Returns
-        -------
-        dict with 'total', 'mae_diff', and optional regularizer values.
-        """
         # Normalize to match scales (AutoPhaseNN normalizes to max=1)
         pred_norm = pred_diff_mag / (pred_diff_mag.amax(dim=(2,3,4), keepdim=True) + 1e-8)
         meas_norm = measured_diff_mag / (measured_diff_mag.amax(dim=(2,3,4), keepdim=True) + 1e-8)

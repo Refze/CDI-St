@@ -1,20 +1,3 @@
-"""
-nn_visualize.py — Visualize BCDI phase retrieval reconstruction results.
-
-Fixed version with:
-    - Correct real-space vs reciprocal-space comparison
-    - Phase unwrapping / global offset removal
-    - Diffraction-space comparison (the scientifically meaningful one)
-    - Better interpretation of convergence curves
-    - Helper to find samples with actual strain for meaningful testing
-
-Usage:
-    %run nn_visualize.py --input reconstruction.npz
-    %run nn_visualize.py --input reconstruction.npz --ground_truth training_data/sample_00000.npz
-    %run nn_visualize.py --find_strained                  # List samples WITH strain/dislocation
-    %run nn_visualize.py --input reconstruction.npz --save_dir ./figures
-"""
-
 from __future__ import annotations
 import argparse, json
 import numpy as np
@@ -28,7 +11,7 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def load_reconstruction(path: str) -> dict:
-    """Load reconstruction.npz and reconstruct complex object."""
+
     data = np.load(path)
     out = dict(data)
     if 'object_real' in data and 'object_imag' in data:
@@ -47,7 +30,7 @@ def load_reconstruction(path: str) -> dict:
 
 
 def load_ground_truth(path: str) -> dict:
-    """Load original sample .npz for comparison."""
+
     data = np.load(path)
     d = dict(data)
     print(f"\nLoaded ground truth: {path}")
@@ -68,7 +51,7 @@ def load_ground_truth(path: str) -> dict:
 
 
 def find_strained_samples(data_dir: str, limit: int = 20):
-    """List samples that have actual strain or dislocations."""
+
     data_dir = Path(data_dir)
     metas = sorted(data_dir.glob("sample_*_meta.json"))
     if not metas:
@@ -103,18 +86,8 @@ def find_strained_samples(data_dir: str, limit: int = 20):
     print(f"{'='*76}\n")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Preprocessing: remove trivial ambiguities
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def remove_global_phase(phase: np.ndarray, support: np.ndarray) -> np.ndarray:
-    """
-    Remove global phase offset (trivial phase-retrieval ambiguity).
 
-    The diffraction pattern |F(q)|² is invariant under ρ(r) → ρ(r)·e^{iφ₀},
-    so phase is only recoverable up to a constant. Subtract the circular mean
-    over the support so comparisons are meaningful.
-    """
     mask = support > 0.5
     if mask.sum() == 0:
         return phase
@@ -123,9 +96,6 @@ def remove_global_phase(phase: np.ndarray, support: np.ndarray) -> np.ndarray:
     return np.angle(np.exp(1j * unwrapped))  # Re-wrap to [-π, π]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Figure 1: Real-space reconstruction overview
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def fig_overview(recon: dict, save_path: str = None):
     support = recon.get('support', np.ones_like(recon['phase']))
@@ -165,16 +135,8 @@ def fig_overview(recon: dict, save_path: str = None):
     plt.show()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Figure 2: Diffraction-space comparison (the RIGHT one)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def fig_diffraction_comparison(recon: dict, truth: dict, save_path: str = None):
-    """
-    FFT(reconstructed_object) vs measured amplitude.
 
-    This is apples-to-apples: both are reciprocal-space amplitudes.
-    """
     obj = recon['object_3d']
     F_recon = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(obj)))
     amp_recon_q = np.abs(F_recon).astype(np.float32)
@@ -222,10 +184,6 @@ def fig_diffraction_comparison(recon: dict, truth: dict, save_path: str = None):
         print(f"  Saved: {save_path}")
     plt.show()
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Figure 3: Phase comparison with offset removed
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def fig_phase_comparison(recon: dict, truth: dict, save_path: str = None):
     support = recon.get('support', truth['support']).astype(np.float32)
@@ -285,10 +243,6 @@ def fig_phase_comparison(recon: dict, truth: dict, save_path: str = None):
     plt.show()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Figure 4: Convergence with annotations
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def fig_convergence(recon: dict, save_path: str = None):
     if 'error_metric' not in recon or len(recon['error_metric']) == 0:
         return
@@ -325,9 +279,6 @@ def fig_convergence(recon: dict, save_path: str = None):
     plt.show()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize BCDI reconstruction')

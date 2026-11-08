@@ -1,4 +1,3 @@
-"""bcdi_core.py v6.0 — dislocation loops, CIF import, rect detector, detector presets, export."""
 from __future__ import annotations
 import os,warnings,re,tempfile
 from pathlib import Path
@@ -14,6 +13,7 @@ try:
     import xrayutilities as xu; _HAS_XU=True
 except: xu=None; _HAS_XU=False
 warnings.filterwarnings('ignore')
+import facets, ortho
 
 def _6c_R3m(z):
     return [[0,0,z%1],[2/3,1/3,(z+1/3)%1],[1/3,2/3,(z+2/3)%1],[0,0,(1-z)%1],[2/3,1/3,(1-z+1/3)%1],[1/3,2/3,(1-z+2/3)%1]]
@@ -22,17 +22,19 @@ def _3a_R3m():
 def _3_from_6c_R3m(z):
     return [[0,0,z%1],[2/3,1/3,(z+1/3)%1],[1/3,2/3,(z+2/3)%1]]
 
+# counting=True -> hybrid photon-counting pixel detector: Poisson only, no read noise
 DETECTOR_PRESETS={
-    'Custom':{'nx':128,'ny':128,'pixel_um':55.0},
-    'Eiger2 500K':{'nx':1028,'ny':512,'pixel_um':75.0},
-    'Eiger2 1M':{'nx':1028,'ny':1062,'pixel_um':75.0},
-    'Eiger2 4M':{'nx':2068,'ny':2162,'pixel_um':75.0},
-    'Maxipix 1x1':{'nx':256,'ny':256,'pixel_um':55.0},
-    'Maxipix 2x2':{'nx':516,'ny':516,'pixel_um':55.0},
-    'Merlin Quad':{'nx':512,'ny':512,'pixel_um':55.0},
-    'Pilatus 100K':{'nx':487,'ny':195,'pixel_um':172.0},
-    'Pilatus 300K':{'nx':487,'ny':619,'pixel_um':172.0},
-    'Timepix3':{'nx':256,'ny':256,'pixel_um':55.0},
+    'Custom':{'nx':128,'ny':128,'pixel_um':55.0,'counting':True,'dark_cps':0.0},
+    'Eiger2 500K':{'nx':1028,'ny':512,'pixel_um':75.0,'counting':True,'dark_cps':0.0},
+    'Eiger2 1M':{'nx':1028,'ny':1062,'pixel_um':75.0,'counting':True,'dark_cps':0.0},
+    'Eiger2 4M':{'nx':2068,'ny':2162,'pixel_um':75.0,'counting':True,'dark_cps':0.0},
+    'Maxipix 1x1':{'nx':256,'ny':256,'pixel_um':55.0,'counting':True,'dark_cps':0.0},
+    'Maxipix 2x2':{'nx':516,'ny':516,'pixel_um':55.0,'counting':True,'dark_cps':0.0},
+    'Merlin Quad':{'nx':512,'ny':512,'pixel_um':55.0,'counting':True,'dark_cps':0.0},
+    'Pilatus 100K':{'nx':487,'ny':195,'pixel_um':172.0,'counting':True,'dark_cps':0.0},
+    'Pilatus 300K':{'nx':487,'ny':619,'pixel_um':172.0,'counting':True,'dark_cps':0.0},
+    'Timepix3':{'nx':256,'ny':256,'pixel_um':55.0,'counting':True,'dark_cps':0.0},
+    'CCD (integrating)':{'nx':1024,'ny':1024,'pixel_um':13.5,'counting':False,'dark_cps':0.05},
 }
 
 MATERIAL_PRESETS={
@@ -113,11 +115,18 @@ def default_shape_for_material(n):
     if ct in('hcp','wurtzite') or m['gamma']==120: return 'hexagonal'
     return 'cube'
 def compatible_shapes(n):
-    if n not in MATERIAL_PRESETS: return ['cube','rectangle','cylinder','hexagonal','sphere']
+    base=['cube','rectangle','cylinder','sphere']
+    ded=lambda L:list(dict.fromkeys(L))
+    if n not in MATERIAL_PRESETS: return ded(base+['hexagonal']+facets.CUBIC_SHAPES+facets.HEX_SHAPES)
     m=MATERIAL_PRESETS[n];ct=m['crystal_type']
-    if ct in('fcc','bcc','diamond'): return ['cube','rectangle','cylinder','sphere']
-    if ct in('hcp','wurtzite') or m['gamma']==120: return ['hexagonal','cylinder','sphere']
-    return ['cube','rectangle','cylinder','hexagonal','sphere']
+    if ct in('fcc','bcc','diamond'): return ded(base+facets.CUBIC_SHAPES)
+    if ct in('hcp','wurtzite') or m['gamma']==120: return ['hexagonal','cylinder','sphere']+facets.HEX_SHAPES
+    return ded(base+['hexagonal']+facets.CUBIC_SHAPES+facets.HEX_SHAPES)
+
+def cells_for_size_nm(name,size_nm):
+    """Supercell multiples giving a particle of the requested size in nm."""
+    c=BCDIConfig(name);M=c.lattice_vectors_cartesian;t=float(size_nm)*10.
+    return tuple(max(1,int(round(t/np.linalg.norm(M[i])))) for i in range(3))
 def find_preset(q):
     q=q.strip()
     if q in MATERIAL_PRESETS: return q
@@ -156,10 +165,16 @@ class BCDIConfig:
         self.ROCKING_STEPS=128;self.ROCKING_STEP_DEG=.00315
         self.SOURCE_SIZE_H_UM=300.;self.SOURCE_SIZE_V_UM=10.;self.SOURCE_DISTANCE_M=50.;self.MONOCHR_BANDWIDTH=1e-4
         self.STRAIN_TYPE='none';self.STRAIN_MAGNITUDE=1e-4;self.TARGET_OVERSAMPLING=5.;self.ANGULAR_OFFSET_DEG=0.0
+        self.N_PHOTONS=1e9;self.PHOTON_MODE='total';self.SIM_GRID_MAX=192;self.WULFF_RATIO=1.15;self.Q_FRAME='lab';self.DET_COUNTING=True
         self.HKL_MAX_SEARCH=5;self.Q_MAX_INV_ANG=8.;self.TWO_THETA_MIN=10.;self.TWO_THETA_MAX=90.
         self.OUTPUT_DIR=Path('bcdi_output');self.OUTPUT_DIR.mkdir(exist_ok=True)
     @property
-    def DETECTOR_N_PIXELS(self): return max(self.DETECTOR_NX, self.DETECTOR_NY)
+    def DETECTOR_N_PIXELS(self):
+        """Side of the cubic FFT grid: the Bragg ROI cropped from the panel, as in a
+        real analysis. DETECTOR_NX/NY describe the physical panel and are exported
+        as metadata; they do not set the transform size (a 4 Mpixel panel would be
+        a 2068^3 complex FFT)."""
+        return int(self.SIM_GRID_MAX)
     @property
     def wavelength_angstrom(self): return self.HC_KEV_ANG/self.BEAM_ENERGY_KEV
     @property
@@ -216,6 +231,9 @@ class CrystalBuilder:
         elif s=='sphere': R=0.47*min(Lx,Ly,Lz);mask=(r**2).sum(1)<=R**2
         elif s=='hexagonal':
             s3=np.sqrt(3.)/2.;mask=np.maximum(np.abs(r[:,0]),np.maximum(np.abs(.5*r[:,0]+s3*r[:,1]),np.abs(.5*r[:,0]-s3*r[:,1])))<=R_xy
+        elif s in facets.SHAPES:
+            Nn,Dd=facets.normals(s,cfg.reciprocal_lattice_vectors,cfg.WULFF_RATIO)
+            R=facets.scale_to_size(Nn,Dd,0.94*min(Lx,Ly,Lz));mask=facets.mask(p,center,Nn,Dd,R)
         else: return
         self.supercell_positions_ang=p[mask];self.supercell_species=[sv for sv,m in zip(self.supercell_species,mask) if m]
         if self._cell_indices: self._cell_indices=[c for c,m in zip(self._cell_indices,mask) if m]
@@ -351,7 +369,8 @@ class ReflectionCalculator:
                         fk=self._fk(np.array([h,k,l]),ops);iu=fk not in seen
                         if iu: seen.add(fk)
                     else: iu=(h>=0)and(h>=k)and(k>=l)and(l>=0)
-                    rows.append({'hkl':(h,k,l),'hkl_str':f'({h} {k} {l})','d_Ang':round(d,4),'2theta':round(tt,4),'theta_B':round(tt/2.,4),'q_Ang':round(q,4),'|F|':round(Fa,3),'F_sq':round(F2,2),'LP':round(LP,4),'unique':iu})
+                    rows.append({'hkl':(h,k,l),'hkl_str':f'({h} {k} {l})','d_Ang':round(d,4),'2theta':round(tt,4),'theta_B':round(tt/2.,4),'q_Ang':round(q,4),'|F|':round(Fa,3),'F_sq':round(F2,2),'LP':round(LP,4),'unique':iu,
+                                 '_d':d,'_tt':tt,'_q':q,'_F2':F2,'_LP':LP})
         df=pd.DataFrame(rows).sort_values('q_Ang').reset_index(drop=True)
         df=df[df['unique']].copy().reset_index(drop=True)
         df['I_rel']=df['F_sq']*df['LP'];mx=df['I_rel'].max() if len(df) else 1.
@@ -381,7 +400,11 @@ class ReflectionCalculator:
                     if len(m): break
             if len(m)==0: raise ValueError(f'Reflection ({h} {k} {l}) not found')
             sel=m.iloc[0]
-        return{'hkl':sel['hkl'],'hkl_str':sel['hkl_str'],'d_hkl':sel['d_Ang'],'theta_B_rad':np.radians(sel['theta_B']),'two_theta_rad':np.radians(sel['2theta']),'q_magnitude':sel['q_Ang'],'F_squared':sel['F_sq'],'LP_factor':sel['LP'],'intensity_norm':sel['I_norm']}
+        # full-precision values; the rounded columns are for display only
+        return{'hkl':sel['hkl'],'hkl_str':sel.get('hkl_display',sel['hkl_str']),'hkl_raw':sel['hkl_str'],
+               'd_hkl':float(sel['_d']),'theta_B_rad':np.radians(sel['_tt']/2.),'two_theta_rad':np.radians(sel['_tt']),
+               'q_magnitude':float(sel['_q']),'F_squared':float(sel['_F2']),'LP_factor':float(sel['_LP']),
+               'intensity_norm':float(sel['I_norm'])}
 
 class BCDISimulator:
     def __init__(self,config,reflection,crystal_builder=None):
@@ -437,6 +460,9 @@ class BCDISimulator:
         if s=='sphere': return np.sqrt(X**2+Y**2+Z**2)<=h
         if s=='hexagonal':
             s3=np.sqrt(3.)/2.;return(np.maximum(np.abs(X),np.maximum(np.abs(.5*X+s3*Y),np.abs(.5*X-s3*Y)))<=h)&(np.abs(Z)<=h)
+        if s in facets.SHAPES:
+            Nn,Dd=facets.normals(s,self.config.reciprocal_lattice_vectors,self.config.WULFF_RATIO)
+            return facets.grid_mask(X,Y,Z,Nn,Dd,facets.scale_to_size(Nn,Dd,2*h))
         return(np.abs(X)<=h)&(np.abs(Y)<=h)&(np.abs(Z)<=h)
     def simulate(self,progress_cb=None):
         c=self.config;N=c.DETECTOR_N_PIXELS;tA=c.particle_size_angstrom;F2=self.reflection['F_squared'];Vc=c.unit_cell_volume_ang3;LP=self.reflection['LP_factor'];OS=c.TARGET_OVERSAMPLING
@@ -448,13 +474,11 @@ class BCDISimulator:
             sup=self._sup(N,OS).astype(np.float32);ph=self._displacement(N,tA,OS);psi=sup*np.exp(1j*ph)
             if progress_cb: progress_cb(40)
             # Apply angular offset as phase ramp (shifts Bragg peak off-center)
-            # AND attenuate intensity by the kinematic rocking curve envelope
             if abs(c.ANGULAR_OFFSET_DEG)>1e-6:
                 delta_th=np.radians(c.ANGULAR_OFFSET_DEG/2.)
                 delta_q=(4*np.pi/c.wavelength_angstrom)*np.cos(self.reflection['theta_B_rad'])*delta_th
-                # Phase ramp along first spatial axis (real-space extent = OS*tA)
-                ext0=OS*tA[0]
-                rx=np.linspace(-ext0/2,ext0/2,N,dtype=np.float32)
+                # Phase ramp along first spatial axis
+                rx=np.linspace(-ext[0]/2,ext[0]/2,N,dtype=np.float32)
                 phase_ramp=np.exp(1j*delta_q*rx)[:,None,None]
                 psi=psi*phase_ramp
             pq=np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(psi)))
@@ -472,54 +496,64 @@ class BCDISimulator:
             diff=pf*(sx**2)[:,None,None]*(sy**2)[None,:,None]*(sz**2)[None,None,:]
             if progress_cb: progress_cb(70)
         diff=self._pc(diff.astype(np.float32),dqx,dqy,dqz)
-        # Angular offset: attenuate by kinematic rocking curve envelope
-        # Away from exact Bragg condition, intensity drops as sinc^2
-        if abs(c.ANGULAR_OFFSET_DEG)>1e-6:
-            # Shape-aware physical particle size (not just supercell box)
-            # For sphere/cylinder/hexagonal, the inscribed shape is smaller than the box
-            shape=c.PARTICLE_SHAPE
-            if shape=='sphere':
-                D_phys=float(min(tA))                  # diameter = smallest box dim
-            elif shape=='cylinder':
-                D_phys=float(min(tA[0],tA[1]))         # diameter in basal plane
-            elif shape=='hexagonal':
-                D_phys=float(min(tA[0],tA[1]))         # in-plane width
-            else:
-                D_phys=float(np.mean(tA))              # cube/rectangle: full extent
-            th_B=self.reflection['theta_B_rad']
-            # Kinematic rocking curve FWHM: dw ~ 2*lambda/(D*sin(2*theta_B))
-            dw_fwhm=2.*c.wavelength_angstrom/(D_phys*np.sin(2.*th_B)+1e-12)
-            delta_deg=abs(c.ANGULAR_OFFSET_DEG)
-            # Number of FWHM widths away
-            n_fwhm=delta_deg/max(np.degrees(dw_fwhm),1e-10)
-            # Gaussian attenuation (matches kinematic rocking curve envelope)
-            attenuation=np.exp(-2.*np.log(2)*(n_fwhm**2))
-            diff*=attenuation
         if progress_cb: progress_cb(95)
         self.diff_volume=diff.astype(np.float32);self.q_grids={'qx':qx,'qy':qy,'qz':qz}
         xh,xv,xl=self._coh();self.coherence={'xi_h_A':xh,'xi_v_A':xv,'xi_l_A':xl}
         if progress_cb: progress_cb(100);return diff,self.q_grids
 
-def add_experimental_noise(vol,poisson=True,readout_noise=0,air_scatter=0,dead_pixels_frac=0,seed=42):
-    rng=np.random.default_rng(seed);out=vol.copy().astype(np.float64)
+def add_experimental_noise(vol,n_photons=None,photon_mode='total',poisson=True,air_scatter=0,
+                           readout_noise=0,dark_cps=0,exposure_s=1.,dead_pixels_frac=0,
+                           hot_pixels_frac=0,counting=True,seed=42):
+    """Photon budget first, then instrument effects.
+
+    n_photons sets the counting statistics: everything else is relative to it.
+    readout_noise applies only to integrating detectors (counting=False); EIGER,
+    PILATUS, MAXIPIX, MERLIN and TIMEPIX are photon counting and have none.
+    """
+    rng=np.random.default_rng(seed);out=np.asarray(vol,np.float64)
     if air_scatter>0:
-        N=vol.shape[0];c=N//2;r0=max(1,N//4);x=np.arange(N)-c;QX,QY,QZ=np.meshgrid(x,x,x,indexing='ij')
-        r_norm=(QX**2+QY**2+QZ**2)/(r0**2+1e-10);peak=max(1.0,vol.max());out+=peak*air_scatter*1e-6/(1.+r_norm**2)
-    if poisson:
-        scale=1e6/max(1,out.max());counts=np.clip(out*scale,0,1e12);out=rng.poisson(counts.astype(np.float64)).astype(np.float64)/scale
-    if readout_noise>0: out+=rng.normal(0,readout_noise*out.max()*1e-6,out.shape);out=np.maximum(out,0)
-    if dead_pixels_frac>0:
-        n_dead=int(dead_pixels_frac*out.size);idx=rng.choice(out.size,n_dead,replace=False);out.flat[idx]=0
-    return out.astype(np.float32)
+        N=out.shape[0];c=N//2;r0=max(1,N//4);x=np.arange(N)-c;QX,QY,QZ=np.meshgrid(x,x,x,indexing='ij')
+        rn=(QX**2+QY**2+QZ**2)/(r0**2+1e-10);out=out+max(1.,out.max())*air_scatter*1e-6/(1.+rn**2)
+    if n_photons and n_photons>0:
+        out=ortho.apply_photons(out,n_photons,photon_mode,poisson=poisson,seed=seed).astype(np.float64)
+    elif poisson:
+        sc=1e6/max(1,out.max());out=rng.poisson(np.clip(out*sc,0,1e12)).astype(np.float64)/sc
+    return ortho.detector_noise(out,dark_cps=dark_cps,exposure_s=exposure_s,
+                                readout_e=0. if counting else readout_noise,
+                                dead_frac=dead_pixels_frac,hot_frac=hot_pixels_frac,seed=seed)
+
+def q_sampling(cfg,theta_B_rad=None):
+    """Compare the simulation q voxel with a real detector pixel.
+
+    The simulated grid is set by the particle size and oversampling; the panel
+    grid by pixel size and distance. Matching them 1:1 needs N >> OS, so the
+    simulation is deliberately coarser. Returns (dq_sim, dq_pixel, implied_OS).
+    """
+    k=2*np.pi/cfg.wavelength_angstrom
+    dq_sim=(2*np.pi/cfg.particle_size_angstrom[0])/cfg.TARGET_OVERSAMPLING
+    dq_pix=k*(cfg.DETECTOR_PIXEL_UM*1e-6)/cfg.SAMPLE_DETECTOR_DISTANCE_M
+    return dq_sim,dq_pix,(2*np.pi/cfg.particle_size_angstrom[0])/dq_pix
+
+def offset_report(cfg,theta_B_rad,d2th_deg):
+    """What a 2theta offset does: dq, shift in sim voxels and in real pixels."""
+    dq=(4*np.pi/cfg.wavelength_angstrom)*np.cos(theta_B_rad)*np.radians(d2th_deg/2.)
+    ds,dp,_=q_sampling(cfg)
+    N=cfg.DETECTOR_N_PIXELS
+    return dq,dq/ds,dq/dp,abs(dq/ds)>N/2
+
+def to_frame(sim,frame='lab',vol=None):
+    """Return (volume, label). 'lab' = orthogonal q; 'det' = raw skewed detector grid."""
+    v=sim.diff_volume if vol is None else vol
+    if frame!='det': return v,'sample / lab frame (orthogonal q)'
+    c=sim.config;tt=np.degrees(sim.reflection['two_theta_rad'])
+    M,_=ortho.det_matrix(c.wavelength_angstrom,tt,c.DETECTOR_PIXEL_UM,
+                         c.SAMPLE_DETECTOR_DISTANCE_M,c.ROCKING_STEP_DEG)
+    return ortho.lab_to_det(v,sim.q_grids,M,order=3),f'detector frame (raw grid, skew={ortho.skew(M):.3f})'
 
 def export_measurement(sim,refl,cfg,filepath,noise_opts=None):
     """Export simulation as .npz (like real BCDI measurement data)."""
     vol=sim.diff_volume.copy()
     if noise_opts: vol=add_experimental_noise(vol,**noise_opts)
-    # Real-space voxel pitch in nm = (object size * oversampling) / grid_size
-    N=cfg.DETECTOR_N_PIXELS
-    psize_arr=np.asarray(cfg.particle_size_nm,dtype=np.float32)
-    voxel_nm=(psize_arr*float(cfg.TARGET_OVERSAMPLING)/float(N))
     data={'diffraction_volume':vol,'qx':sim.q_grids['qx'],'qy':sim.q_grids['qy'],'qz':sim.q_grids['qz'],
           'hkl':np.array(refl['hkl']),'d_hkl':refl['d_hkl'],'two_theta':np.degrees(refl['two_theta_rad']),
           'energy_keV':cfg.BEAM_ENERGY_KEV,'wavelength_A':cfg.wavelength_angstrom,
@@ -529,7 +563,9 @@ def export_measurement(sim,refl,cfg,filepath,noise_opts=None):
           'detector_nx':cfg.DETECTOR_NX,'detector_ny':cfg.DETECTOR_NY,
           'rocking_step_deg':cfg.ROCKING_STEP_DEG,'rocking_steps':cfg.ROCKING_STEPS,
           'beam_size_um':cfg.BEAM_SIZE_UM,'oversampling':cfg.TARGET_OVERSAMPLING,
-          'particle_size_nm':psize_arr,'voxel_size_nm':voxel_nm}
+          'n_photons':getattr(cfg,'N_PHOTONS',0),'photon_mode':getattr(cfg,'PHOTON_MODE','total'),
+          'q_frame':getattr(cfg,'Q_FRAME','lab'),'detector_counting':getattr(cfg,'DET_COUNTING',True),
+          'particle_size_nm':cfg.particle_size_nm}
     if filepath.endswith('.h5') or filepath.endswith('.hdf5'):
         import h5py
         with h5py.File(filepath,'w') as f:
@@ -621,11 +657,12 @@ def lattice_html_with_controls(builder,max_atoms=50000,atom_size=3,show_bonds=Fa
     html=html.replace('<body>','<body>'+_loading_html('Rendering 3D Lattice...'),1)
     return html.replace('</body>',PANEL+'</body>',1)
 
-def bragg_html_with_controls(sim,downsample=2,threshold_frac=1e-4,noise_opts=None):
+def bragg_html_with_controls(sim,downsample=2,threshold_frac=1e-4,noise_opts=None,vol=None,frame_label=''):
     import plotly.graph_objects as go
     if sim.diff_volume is None: return None
-    vol=sim.diff_volume.copy()
-    if noise_opts: vol=add_experimental_noise(vol,**noise_opts)
+    if vol is None:
+        vol=sim.diff_volume.copy()
+        if noise_opts: vol=add_experimental_noise(vol,**noise_opts)
     d3=vol[::downsample,::downsample,::downsample]
     qx=sim.q_grids['qx'][::downsample];qy=sim.q_grids['qy'][::downsample];qz=sim.q_grids['qz'][::downsample]
     vl=np.log10(d3+1.).astype(np.float32);vm=float(vl.max())
@@ -641,6 +678,7 @@ def bragg_html_with_controls(sim,downsample=2,threshold_frac=1e-4,noise_opts=Non
         if noise_opts.get('air_scatter',0)>0: parts.append("air")
         if noise_opts.get('dead_pixels_frac',0)>0: parts.append("dead")
         if parts: noise_str=" | "+", ".join(parts)
+    if frame_label: noise_str+=" | "+frame_label
     fig.update_layout(template='plotly_dark',paper_bgcolor='#0d0e12',scene=dict(xaxis=dict(**ax,title='qx(1/A)'),yaxis=dict(**ax,title='qy(1/A)'),zaxis=dict(**ax,title='qz(1/A)'),camera=dict(eye=dict(x=1.4,y=1.4,z=.7)),aspectmode='data'),font=dict(family='Consolas,monospace',size=11,color='#c0c4cc'),title=dict(text=f'{cfg.MATERIAL_NAME} {sim.reflection["hkl_str"]} | {sz[0]:.0f}x{sz[1]:.0f}x{sz[2]:.0f}nm{noise_str}',font=dict(size=12),x=.5,xanchor='center'),margin=dict(l=0,r=0,t=40,b=0))
     # Fringe measurement JS
     measure_js="""<div id="meas" style="position:fixed;top:16px;right:16px;z-index:9999;background:rgba(13,14,18,.93);border:1px solid rgba(255,255,255,.13);border-radius:10px;padding:8px 12px;font-family:Consolas,monospace;font-size:11px;color:#c0c4cc;display:none">

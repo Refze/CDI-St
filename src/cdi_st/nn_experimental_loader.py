@@ -1,65 +1,9 @@
-"""
-nn_experimental_loader.py — Load real BCDI experimental data from .h5 files.
-
-Supports:
-    - ID01 / BLISS format (ESRF)      — primary target
-    - 34-ID-C format (APS)            — AutoPhaseNN paper format
-    - Generic .h5 with a 3D dataset   — fallback
-
-Key operations:
-    1. Locate the 3D diffraction volume in the HDF5 tree
-    2. Threshold hot pixels and beamstop
-    3. Center the Bragg peak (center of mass)
-    4. Crop / pad to the target grid size (64 or 128)
-    5. Resample to the target oversampling ratio (~3.0, following AutoPhaseNN)
-
-The resulting preprocessed volume can be passed to either:
-    - nn_phase_retrieval.py (supervised model)
-    - nn_autophase_infer.py (unsupervised model)
-    - The unsupervised training loop (for fine-tuning)
-
-Requires h5py. If you don't have it installed yet:
-    pip install h5py
-
-Usage:
-    # Inspect the structure of an unknown .h5 file:
-    python nn_experimental_loader.py --input scan_123.h5 --inspect
-
-    # Load and preprocess, save as .npz:
-    python nn_experimental_loader.py --input scan_123.h5 --output preprocessed.npz
-
-    # Specify dataset path explicitly if auto-detect fails:
-    python nn_experimental_loader.py --input scan_123.h5 \\
-        --dataset_path /entry_0000/measurement/merlin/data
-"""
-
 from __future__ import annotations
 import argparse, json
 import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Auto-load HDF5 compression plugins for Eiger/Lambda/Pilatus data.
-#
-# Eiger detectors (used at PETRA III P10/P21 and many other beamlines) write
-# data with bitshuffle + LZ4 compression (filter ID 32008). This filter is
-# NOT bundled with h5py — it lives in the `hdf5plugin` package.
-#
-# Without hdf5plugin, attempting to read a compressed Eiger dataset gives
-# the cryptic error:
-#       "Can't synchronously read data (can't open directory)"
-# This is HDF5 looking for the plugin DLL/SO in a directory that doesn't
-# exist on the user's machine.
-#
-# Importing hdf5plugin registers all common scientific compression filters
-# (bitshuffle, LZ4, zstd, blosc, fcidecomp) with the HDF5 library, after
-# which h5py can read the data transparently.
-#
-# We capture the availability status so we can give a USEFUL error message
-# if the user tries to read a compressed file without hdf5plugin installed.
-# ═══════════════════════════════════════════════════════════════════════════════
 try:
     import hdf5plugin  # noqa: F401  — registers LZ4/bitshuffle/zstd filters
     _HDF5_PLUGINS_AVAILABLE = True
@@ -82,15 +26,6 @@ _BUILTIN_FILTER_IDS = {0, 1, 2, 4, 32000}   # uncompressed, deflate, shuffle, sz
 
 
 def _dataset_requires_plugin(dataset) -> Optional[str]:
-    """
-    Check if a dataset uses a compression filter that requires hdf5plugin.
-
-    Returns
-    -------
-    None if the dataset uses only built-in filters.
-    A descriptive string (e.g. "Bitshuffle + LZ4") if the dataset needs
-    hdf5plugin and the filter is one of the known plugin-requiring filters.
-    """
     try:
         plist = dataset.id.get_create_plist()
         for i in range(plist.get_nfilters()):
@@ -107,12 +42,6 @@ def _dataset_requires_plugin(dataset) -> Optional[str]:
 
 
 def _is_compression_plugin_error(err: Exception) -> bool:
-    """
-    Heuristic: detect if an exception is the cryptic "missing HDF5 compression
-    plugin" error. Symptom on Windows: 'Can't synchronously read data (can't
-    open directory)'. On Linux: similar errors mentioning 'open directory' or
-    'plugin'.
-    """
     msg = str(err).lower()
     return (
         "open directory" in msg
@@ -153,18 +82,6 @@ KNOWN_PATHS = [
 
 
 def _find_p10_master(data_path: str) -> Optional[str]:
-    """
-    For a P10 'data file' like 'align_03_01698_data_000001.h5', look for the
-    corresponding 'master.h5' in the same directory.
-
-    P10 (and most modern Eiger setups) writes scans as one 'master' file plus
-    one or more numbered data chunks. The master file contains a Virtual
-    Dataset (VDS) that links the chunks together. Reading a single chunk
-    directly often fails or yields partial data — the master is the correct
-    entry point.
-
-    Returns the path to the master file if found, else None.
-    """
     import os, re
     if not data_path:
         return None
@@ -189,32 +106,6 @@ def _find_p10_master(data_path: str) -> Optional[str]:
 
 
 def parse_p10_fio(fio_path: str) -> dict:
-    """
-    Parse a P10 (DESY) '.fio' metadata file.
-
-    .fio is a custom ASCII format used at PETRA III. Structure:
-
-        !
-        ! Comments
-        !
-        %c
-         scan_command_here
-        %p
-         param_name = value
-         ...
-        %d
-         Col 1 motor_or_counter_name DOUBLE
-         Col 2 mpx4inr INTEGER
-         ...
-         value1 value2 ...
-         value1 value2 ...
-
-    Returns a dict with:
-        scan_command : str
-        params : dict[str, str/float]    # %p block
-        columns : list[str]              # column names from %d block
-        data : dict[str, np.ndarray]     # column data
-    """
     import re
     result = {
         "scan_command": "",
@@ -284,13 +175,6 @@ def _is_number(s: str) -> bool:
 
 
 def diagnose_vds(dataset, dataset_path: str) -> str:
-    """
-    Diagnose why a Virtual Dataset (VDS) read might fail.
-
-    Returns a human-readable string listing the VDS sources and whether each
-    source file is reachable. Used to translate cryptic HDF5 errors into
-    actionable messages.
-    """
     import os
     lines = [f"  Dataset '{dataset_path}' is a Virtual Dataset (VDS)."]
     try:
@@ -344,19 +228,6 @@ def diagnose_vds(dataset, dataset_path: str) -> str:
 
 def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
                           verbose: bool = False):
-    """
-    Read a dataset, with graceful fallback if it's a VDS whose sources fail,
-    or if it requires a compression plugin we don't have.
-
-    Strategy:
-        0. If the dataset uses a compression filter that needs hdf5plugin
-           and hdf5plugin is NOT installed, raise a clear error.
-        1. If the dataset is a VDS, check whether all its source files exist.
-           If any are missing, REFUSE the bulk read and raise a clear error.
-        2. Otherwise, try bulk read.
-        3. If bulk read fails with "can't open directory" (= compression
-           plugin missing, or VDS source missing), report a useful error.
-    """
     # Step 0: detect compression plugin requirements BEFORE attempting read
     filter_desc = _dataset_requires_plugin(ds)
     if filter_desc is not None and not _HDF5_PLUGINS_AVAILABLE:
@@ -471,11 +342,6 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
 
 
 def inspect_h5(path: str, max_depth: int = 6):
-    """Print the full tree of an .h5 file to help locate the diffraction data.
-
-    Unlike a plain visititems() walk, this also enumerates EXTERNAL LINKS
-    (the most common P10/Eiger pattern), which are otherwise invisible.
-    """
     import os
     try:
         import h5py
@@ -539,10 +405,6 @@ def inspect_h5(path: str, max_depth: int = 6):
 
 
 def _vds_is_readable(ds) -> bool:
-    """
-    Check if a VDS's source files are reachable WITHOUT actually reading.
-    Returns True if not VDS, or if VDS and at least one source exists.
-    """
     import os
     try:
         if not (hasattr(ds, 'is_virtual') and ds.is_virtual):
@@ -568,28 +430,6 @@ def _vds_is_readable(ds) -> bool:
 
 
 def enumerate_external_links(h5_file, group_path: str = "/entry/data") -> list:
-    """
-    Eiger / DESY HDF5 master files store frame data as a series of
-    EXTERNAL LINKS inside `/entry/data/`. Each link has a name like
-    `data_000001`, `data_000002`, ... and points to a separate chunk file.
-
-    External links are NOT visited by `h5py.File.visititems()`, which is why
-    `inspect_h5` shows `/entry/data/` as an empty group even though it
-    contains hundreds of links.
-
-    This function explicitly enumerates the group's keys (which DOES include
-    external links) and returns information about each one.
-
-    Returns
-    -------
-    list of dicts, one per entry:
-        {
-          'name':        'data_000001',
-          'link_type':   'external' | 'soft' | 'dataset' | 'group',
-          'target_file': '<scan>_data_000001.h5'  (only for external),
-          'target_path': '/entry/data/data'       (only for external/soft),
-        }
-    """
     import h5py
     try:
         grp = h5_file[group_path]
@@ -635,34 +475,6 @@ def p10_scan_info(
     h5_path: str,
     group_path: str = "/entry/data",
 ) -> dict:
-    """
-    Cheap preview of a P10 master file: enumerate external links, probe
-    each chunk for frame count + frame shape, and return a summary suitable
-    for showing in a GUI before the user clicks Convert.
-
-    This does NOT decompress any data — it only reads HDF5 metadata, so it
-    is essentially instant even for 381-chunk datasets.
-
-    Parameters
-    ----------
-    h5_path : str
-        Path to the master .h5 file (or any chunk file in the set).
-    group_path : str
-        HDF5 group containing the external links. Default ``/entry/data``.
-
-    Returns
-    -------
-    info : dict with keys
-        - ``master``     : the resolved master file path
-        - ``n_chunks``   : number of external links found
-        - ``n_missing``  : how many chunk files don't exist on disk
-        - ``n_frames``   : total frames across all readable chunks
-        - ``frame_h``    : detector height (pixels)
-        - ``frame_w``    : detector width (pixels)
-        - ``dtype``      : numpy dtype string (e.g. 'uint32')
-        - ``size_full_gb``: GB needed to load all frames at full detector
-        - ``frames_per_chunk``: list of (chunk_name, n_frames_in_chunk)
-    """
     import os, h5py
     # Resolve to master if a chunk was passed
     master = _find_p10_master(h5_path) or h5_path
@@ -728,48 +540,6 @@ def load_p10_from_external_links(
     memory_budget_gb: float = 8.0,
     verbose: bool = True,
 ) -> np.ndarray:
-    """
-    Read P10 / Eiger data from a master file by manually resolving its
-    EXTERNAL LINKS to chunk files.
-
-    This is the correct strategy when the master file contains entries like
-    `/entry/data/data_000001` that are external links to separate chunk files
-    (the standard Eiger/DESY layout). Each chunk file contains contiguous
-    detector data at `/entry/data/data`.
-
-    The reader applies optional ``frame_range`` and ``detector_roi`` *during*
-    the read, so reading e.g. 100 frames out of 3000 only allocates the
-    100-frame volume — never the full 49-GB stack.
-
-    Parameters
-    ----------
-    master_path : str
-        Path to the master .h5 file (typically ``<scan>_master.h5``).
-    group_path : str
-        HDF5 group containing the external links. Default ``/entry/data``.
-    max_frames : int or None
-        Truncate the FINAL volume to this many central frames (legacy).
-        Ignored if ``frame_range`` is also given.
-    frame_range : tuple ``(start, stop)`` or None
-        Read only frames ``[start, stop)`` (Python slice semantics) from the
-        *global* frame index across all chunks. ``start=0, stop=None`` means
-        "from start to end". This is applied chunk-by-chunk so memory usage
-        scales with the requested range, not the total dataset size.
-    detector_roi : tuple ``(y0, y1, x0, x1)`` or None
-        Read only this detector region per frame. Indices are half-open
-        like Python slices. Cuts memory by ``(2167*2070)/(roi area)`` for
-        Eiger 4M data.
-    memory_budget_gb : float
-        Maximum acceptable memory footprint (in GB) for the concatenated
-        volume. If the requested read would exceed this, the function
-        raises ``MemoryError`` with a suggested ``frame_range`` and
-        ``detector_roi`` instead of crashing the Python process.
-    verbose : bool
-
-    Returns
-    -------
-    volume : ndarray, shape (N_frames_selected, H, W), float32
-    """
     import os, h5py
     master_dir = os.path.dirname(os.path.abspath(master_path))
 
@@ -987,17 +757,6 @@ def load_p10_from_external_links(
 
 
 def find_diffraction_dataset(h5_file):
-    """
-    Try known paths first, then scan for any suitable 3D dataset.
-
-    Skips Virtual Datasets whose source files are missing — picks readable
-    contiguous datasets instead. This handles the P10 case where a chunk
-    file's /entry/data/ group also contains VDS placeholders (`data_000001`,
-    `data_000002`) pointing to *other* chunk files that the user doesn't
-    have. The chunk's own contiguous data at `/entry/data/data` is preferred.
-
-    Returns (path_str, dataset) or (None, None) if nothing found.
-    """
     import h5py
 
     # Step 1: try the known paths directly
@@ -1062,19 +821,6 @@ def find_diffraction_dataset(h5_file):
 
 
 def resolve_dataset_path(h5_file, user_path: str):
-    """
-    Resolve a user-provided HDF5 path to an actual Dataset.
-
-    Handles the common confusion where the user types a Group path
-    (e.g. '/entry/data') when they should have typed the Dataset path
-    inside it (e.g. '/entry/data/data'). When the user's path lands on
-    a group, this looks one level deeper for a child named 'data' or
-    for any 3D+ dataset inside.
-
-    Returns
-    -------
-    (resolved_path, dataset)  or  raises a helpful error.
-    """
     import h5py
     if user_path not in h5_file:
         raise KeyError(
@@ -1152,23 +898,6 @@ def resolve_dataset_path(h5_file, user_path: str):
 
 def mask_detector_gaps(volume: np.ndarray,
                           detector: str = 'auto') -> np.ndarray:
-    """
-    Mask the inter-chip gaps of multi-chip BCDI detectors.
-
-    Maxipix (ID01) is a 2×2 array of 256×256 chips with a gap of ~5 pixels
-    between chips at rows/columns 255-260. These gaps appear as zeros and
-    badly bias COM calculations and hot-pixel detection.
-
-    The cdiutils / xrayutilities approach (which is what we follow here)
-    is to FILL the gaps with the local median of surrounding voxels,
-    not leave them as zeros. Zeros pull the COM toward the gap, while
-    the median preserves the actual diffraction signal.
-
-    Detector auto-detect:
-        - 516×516 → Maxipix 2×2 (ID01)
-        - 1062×1028 → Eiger 2M
-        - other → use heuristic detection
-    """
     from scipy.ndimage import median_filter
 
     out = volume.copy().astype(np.float32)
@@ -1251,18 +980,6 @@ def mask_detector_gaps(volume: np.ndarray,
 
 
 def remove_hot_pixels(volume: np.ndarray, threshold_sigma: float = 50.0) -> np.ndarray:
-    """
-    Remove hot pixels (cosmic rays, defective detector pixels) by clipping
-    values that are MUCH higher than their local neighborhood.
-
-    Note: BCDI detector data has very high dynamic range. The Bragg peak
-    itself has intensity 1e4-1e6× higher than the fringes around it. So a
-    sigma-based threshold needs to be VERY high (50+) to avoid clipping
-    the peak. Earlier value of 20 was too aggressive and ate the Bragg peak.
-
-    Better approach: use a 3-pixel median filter and only clip pixels that
-    are 100× the median (single bright pixels surrounded by dark).
-    """
     from scipy.ndimage import median_filter
     # 3D median filter — more robust against the peak itself
     local_median = median_filter(volume, size=3)
@@ -1279,18 +996,6 @@ def remove_hot_pixels(volume: np.ndarray, threshold_sigma: float = 50.0) -> np.n
 def find_bragg_peak_box(volume: np.ndarray,
                           intensity_threshold_pct: float = 1.0,
                           margin_voxels: int = 8) -> tuple:
-    """
-    Locate the Bragg peak by finding the 3D bounding box of voxels above
-    a threshold of the maximum intensity. Returns (z_slice, y_slice, x_slice).
-
-    This is the standard approach in cdiutils, PyNX, BCDI-utilities:
-    1. Find the brightest voxel
-    2. Threshold around it (typically 1% of max — captures the peak + fringes)
-    3. Use the bounding box of the thresholded region
-
-    This is much better than COM-based centering, which is biased by
-    detector noise and beam stops.
-    """
     # Smooth lightly for robust peak finding (3-pixel Gaussian)
     from scipy.ndimage import gaussian_filter
     smoothed = gaussian_filter(volume.astype(np.float32), sigma=2.0)
@@ -1326,13 +1031,6 @@ def find_bragg_peak_box(volume: np.ndarray,
 
 
 def crop_around_peak(volume: np.ndarray, center: tuple, N: int) -> np.ndarray:
-    """
-    Crop a (N, N, N) box around the given center in `volume`.
-    If the box extends beyond the array, pad with zeros (NOT wrap around).
-
-    This replaces both `center_on_bragg_peak` (which used np.roll = wrap)
-    and `crop_or_pad_to` (which centered on grid center, not peak center).
-    """
     cz, cy, cx = center
     half = N // 2
     out = np.zeros((N, N, N), dtype=volume.dtype)
@@ -1354,21 +1052,6 @@ def crop_around_peak(volume: np.ndarray, center: tuple, N: int) -> np.ndarray:
 
 
 def remove_beamstop_streaks(volume: np.ndarray) -> np.ndarray:
-    """
-    Remove beamstop / direct-beam streaks from BCDI data.
-
-    These are bright lines along the rocking-axis direction (axis 0) that
-    persist across all rocking frames — caused by the direct beam catching
-    a beamstop edge or a saturated detector pixel.
-
-    Critical: we ONLY check the detector plane (axes 1, 2). Streaks along
-    the rocking axis are physical (Bragg fringes), so we never collapse
-    along axis 0 to find "streaks" — that would destroy the actual signal.
-
-    Detection: A streak is a (y, x) detector pixel where ALL rocking
-    frames have intensity > 10× the global median. Real Bragg peaks
-    have intensity at only some rocking angles.
-    """
     out = volume.copy().astype(np.float32)
     nz = out[out > 0]
     if len(nz) == 0:
@@ -1409,41 +1092,6 @@ def load_h5_diffraction(
     max_frames: int = None,
     verbose: bool = True,
 ) -> np.ndarray:
-    """
-    Load and preprocess a 3D diffraction volume from an .h5 file.
-
-    Pipeline (matches cdiutils / BCDI-utilities standard):
-        1. Locate dataset in HDF5 tree
-        2. Convert to float32, clip negatives
-        3. Remove beamstop/direct-beam streaks
-        4. Remove hot pixels (conservative threshold to preserve Bragg peak)
-        5. Locate Bragg peak by intensity bounding box
-        6. Crop a (N, N, N) box AROUND the peak (not the array center)
-
-    Parameters
-    ----------
-    path : str
-        Path to .h5 file.
-    dataset_path : str or None
-        HDF5 path to the diffraction dataset. If None, auto-detect.
-    target_size : int
-        Output grid size N → returns (N, N, N) volume.
-    clean_hot_pixels : bool
-        Apply median filter to remove hot pixels.
-    center_peak : bool
-        Locate and crop around the Bragg peak.
-    beamstop_threshold : float
-        Values below this are set to 0 (removes beamstop artifacts).
-    max_frames : int or None
-        Limit the number of detector frames to use (helpful for memory).
-    verbose : bool
-        Print preprocessing diagnostics.
-
-    Returns
-    -------
-    diffraction : ndarray [N, N, N]
-        Preprocessed 3D diffraction volume (intensity, not amplitude).
-    """
     try:
         import h5py
     except ImportError:
@@ -1596,17 +1244,6 @@ def load_h5_diffraction(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def list_spec_scans(spec_path: str) -> list:
-    """
-    Return a list of all scans in a SPEC file with summary info, so the GUI
-    can show the user which scan number corresponds to which frame range.
-
-    Returns a list of dicts with keys:
-        scan_number  — the #S N integer (1, 2, 3, ...)
-        command      — the scan command, e.g. "ascan eta 33.5 34.5 100 1"
-        n_points     — number of measurement points
-        frame_min    — first CCD frame number (from mpx4inr column)
-        frame_max    — last CCD frame number
-    """
     out = []
     try:
         from silx.io.specfile import SpecFile
@@ -1706,30 +1343,6 @@ def list_spec_scans(spec_path: str) -> list:
 
 
 def read_spec_scan(spec_path: str, scan_number: int) -> dict:
-    """
-    Read motor positions for a scan from a SPEC file.
-
-    SPEC files are the native ID01 (and many other beamlines') metadata
-    format used before BLISS/HDF5 became standard. They contain:
-        - Header with motor names + initial positions ('motors' dict)
-        - Per-scan motor sweeps (eta or phi rocking)
-        - CCD frame numbers (mpx4inr column)
-
-    This function returns the motor positions needed for q-space
-    orthogonalization: eta, phi, nu, delta arrays + the rocking type.
-
-    Requires the `spec` Python package:
-        pip install spec
-    Or alternatively `silx.io.specfile` which is more modern.
-
-    Returns
-    -------
-    dict with keys:
-        'eta', 'phi', 'nu', 'delta'    — motor angle arrays (degrees)
-        'mpx4inr'                       — CCD frame numbers
-        'rocking_type'                  — 'eta' or 'phi'
-        'header_motors'                 — dict of all initial motor positions
-    """
     try:
         # Try silx first (more modern, better maintained)
         from silx.io.specfile import SpecFile
@@ -1802,35 +1415,6 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
 
 
 def _filter_existing_edf_frames(edf_template: str, frame_numbers) -> tuple:
-    """
-    Probe the disk to find which EDF frames actually exist for a given
-    template + frame number list.
-
-    SPEC scans sometimes reference frame ranges that include frames the
-    detector never wrote (e.g. acquisition was started a frame late or
-    stopped a frame early). Loading those non-existent frames would either
-    crash the reader or pad the volume with zeros, which contaminates the
-    rocking curve. This helper returns just the frames that exist, plus
-    the indices of the missing ones (so motor arrays can be trimmed
-    consistently).
-
-    Parameters
-    ----------
-    edf_template : str
-        Full filename template with a single %d / %05d for the frame
-        number, e.g. ``/data/scan1/data_mpx4_%05d.edf.gz``.
-    frame_numbers : array-like of int
-        Frame numbers to check.
-
-    Returns
-    -------
-    keep_mask : ndarray of bool, shape (len(frame_numbers),)
-        True where the EDF file exists on disk.
-    existing_numbers : ndarray of int
-        ``frame_numbers[keep_mask]`` — convenience for the caller.
-    missing_numbers : ndarray of int
-        Frame numbers that did NOT have a file on disk.
-    """
     import os
     frame_numbers = np.asarray(frame_numbers, dtype=np.int64)
     keep_mask = np.zeros(len(frame_numbers), dtype=bool)
@@ -1845,30 +1429,6 @@ def _filter_existing_edf_frames(edf_template: str, frame_numbers) -> tuple:
 
 def read_edf_stack(edf_template: str, frame_numbers: list,
                     detector_shape: tuple = (516, 516)) -> np.ndarray:
-    """
-    Read a stack of EDF (European Data Format) detector frames.
-
-    EDF is the legacy ID01 detector format. Each frame is a single .edf or
-    .edf.gz file, named like 'data_mpx4_00123.edf.gz'. This function loads
-    a list of frames into a 3D volume (n_frames, det_y, det_x).
-
-    Requires `xrayutilities` (pip install xrayutilities) which has a
-    convenient EDF reader.
-
-    Parameters
-    ----------
-    edf_template : str
-        Filename template with one %d for frame number, e.g.
-        '/data/dir/data_mpx4_%05d.edf.gz'
-    frame_numbers : list of int
-        Frame numbers to load (typically the 'mpx4inr' column from SPEC).
-    detector_shape : tuple
-        Expected (rows, cols) of each detector frame.
-
-    Returns
-    -------
-    volume : ndarray (n_frames, det_y, det_x)
-    """
     try:
         import xrayutilities as xu
     except ImportError:
@@ -1924,41 +1484,6 @@ def load_spec_edf_scan(
     detector: str = 'maxipix',
     verbose: bool = True,
 ) -> dict:
-    """
-    Full ID01 spec+EDF loader: read motor positions from a SPEC file,
-    load corresponding EDF detector frames, preprocess (gap-mask, hot pixels,
-    streaks, peak finding), and return everything needed for reconstruction
-    PLUS q-space orthogonalization (if xrayutilities is available).
-
-    This is the ID01-native loading path that mirrors what cdiutils does.
-
-    Parameters
-    ----------
-    spec_path : str
-        Path to .spec file containing the scan header.
-    scan_number : int
-        SPEC scan number to load.
-    edf_dir : str
-        Directory containing the .edf.gz detector frames.
-    edf_template_name : str
-        Filename template (default: 'data_mpx4_%05d.edf.gz' for ID01 maxipix)
-    target_size : int
-        Output grid size N → returns (N, N, N) volume.
-    detector_shape : tuple
-        Raw detector dimensions (default 516×516 for Maxipix).
-    detector : str
-        Detector name for gap masking ('maxipix', 'eiger2M', 'auto').
-
-    Returns
-    -------
-    dict with keys:
-        'diffraction'    — preprocessed (target_size,)*3 volume
-        'eta', 'phi', 'nu', 'delta'  — motor arrays (degrees)
-        'rocking_type'   — 'eta' or 'phi'
-        'frame_numbers'  — original CCD frame numbers
-        'q_axes'         — (qx, qy, qz) arrays in 1/Å, IF xrayutilities available
-        'voxel_size_nm'  — real-space voxel pitch (3-vector) IF q_axes present
-    """
     import os
 
     # 1. Read SPEC header
@@ -2140,24 +1665,6 @@ def load_spec_edf_scan(
 
 
 def _find_chunk_internal_data_path(h5_file, hint_path: str = None) -> Optional[str]:
-    """
-    For a P10-style chunk file, find the path to its own contiguous data.
-
-    Different P10 configurations store data at different paths inside the
-    chunk:
-      - /entry/data/data            (NeXus standard)
-      - /entry/data/data_000001     (P10 with numbered datasets — common)
-      - /entry/instrument/eiger_4m/data
-      - /entry/instrument/eiger_500k/data
-      - /entry/instrument/detector/data
-      - /entry_1/data_1/data        (CXI)
-      - /entry/data_NNNN            (some BLISS setups)
-
-    This function scans the file and returns the path that:
-      (1) is a real Dataset (not a Group, not a broken VDS)
-      (2) is 3D with substantial size (> 10k voxels)
-      (3) has reachable data (or is contiguous, not VDS)
-    """
     import h5py
 
     # If hint_path is provided and valid, try it first
@@ -2256,31 +1763,6 @@ def load_p10_chunks_directly(
     max_frames: int = None,
     verbose: bool = True,
 ) -> np.ndarray:
-    """
-    BYPASS VDS — directly open each `*_data_NNNNNN.h5` chunk in the directory
-    and concatenate their contiguous data. Auto-discovers the actual dataset
-    path inside each chunk (P10 sometimes stores data at /entry/data/data,
-    sometimes at /entry/data/data_NNNNNN, depending on the acquisition mode).
-
-    Falls back to .cxi if no chunks are found.
-
-    Parameters
-    ----------
-    one_h5_path : str
-        Any file in the dataset's directory — chunk, master, or CXI.
-    chunk_dataset_path : str
-        HINT for the path inside each chunk. If None or the path doesn't
-        exist in a particular chunk, auto-discovers an appropriate one.
-    cxi_dataset_path : str
-        Path inside .cxi files (for the CXI fallback).
-    max_frames : int or None
-        Truncate to at most this many frames (centered).
-    verbose : bool
-
-    Returns
-    -------
-    volume : ndarray  shape (N_frames_total, H, W)  float32
-    """
     import os, re, glob
     try:
         import h5py
@@ -2456,12 +1938,6 @@ def load_p10_chunks_directly(
 
 def _preprocess_p10_volume(raw_volume: np.ndarray, target_size: int = 64,
                             verbose: bool = True) -> np.ndarray:
-    """
-    Apply the same preprocessing as load_h5_diffraction's tail, but starting
-    from a raw frame stack (N_frames, H, W) — the output of
-    load_p10_chunks_directly. Used as the second half of the direct-chunk
-    fallback in p10_h5_to_npz.
-    """
     volume = np.maximum(raw_volume.astype(np.float32), 0)
     if verbose:
         print(f"  Raw volume:    shape={volume.shape}  "
@@ -2515,47 +1991,6 @@ def p10_h5_to_npz(
     detector_roi: tuple = None,
     memory_budget_gb: float = 8.0,
 ):
-    """
-    Load a P10 (PETRA III / DESY) BCDI scan and save as a .npz that
-    CDI-ST reconstruction can use directly.
-
-    Robust to several P10 quirks:
-      1. Master file with external links → reads chunks directly (Eiger default)
-      2. Single chunk with broken VDS placeholders → reads its own data
-      3. Bitshuffle+LZ4 compressed data → requires ``hdf5plugin`` (auto-detected)
-      4. Large multi-thousand-frame scans → use ``frame_range`` / ``detector_roi``
-         to read only a subset (avoids 49-GB memory blow-ups)
-      5. CXI (.cxi) files in the directory → used as fallback if no chunks
-
-    Parameters
-    ----------
-    h5_path : str
-        Any P10 file: master, data chunk, or .cxi.
-    npz_path : str
-        Output .npz filename.
-    fio_path : str or None
-        Optional .fio metadata path (motor positions). Auto-found if None.
-    target_size : int
-        Output cube size (target_size³). The cropped output is centered on
-        the Bragg peak found in the loaded volume.
-    dataset_path : str or None
-        Explicit HDF5 path to detector data. Auto-detected if None.
-    verbose : bool
-    force_direct_chunks : bool
-        If True, skip the master/VDS attempt and go straight to enumerating
-        chunk files in the directory.
-    frame_range : tuple ``(start, stop)`` or None
-        Read only frames in ``[start, stop)`` (across all chunks). Useful for
-        long rocking-curve scans where you only need the frames around the
-        peak. Defaults to ``None`` (all frames).
-    detector_roi : tuple ``(y0, y1, x0, x1)`` or None
-        Read only this detector region per frame. Indices are Python slices.
-        Defaults to ``None`` (full detector).
-    memory_budget_gb : float
-        Maximum estimated memory for the read. If exceeded, the function
-        raises ``MemoryError`` with a suggested ``frame_range`` instead
-        of crashing. Default 8 GB.
-    """
     import os
 
     diffraction = None
@@ -2753,9 +2188,6 @@ def spec_edf_to_npz(
     target_size: int = 64,
     edf_template_name: str = "data_mpx4_%05d.edf.gz",
 ):
-    """
-    One-call helper: convert ID01 spec+EDF to a reconstruction-ready .npz.
-    """
     res = load_spec_edf_scan(
         spec_path=spec_path,
         scan_number=scan_number,
@@ -2789,10 +2221,6 @@ def h5_to_npz(
     dataset_path: str = None,
     target_size: int = 64,
 ):
-    """
-    Convert an experimental .h5 file to an .npz compatible with the dataset
-    loaders (for either inference or fine-tuning the unsupervised model).
-    """
     diffraction = load_h5_diffraction(h5_path, dataset_path, target_size)
 
     # Save as .npz with the same structure as simulated files
