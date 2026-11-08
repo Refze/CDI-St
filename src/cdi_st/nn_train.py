@@ -1,24 +1,3 @@
-"""
-nn_train.py — Training loop for the BCDI phase prediction U-Net.
-
-Handles:
-    - Training with mixed-precision (AMP) for faster GPU utilization
-    - Cosine annealing learning rate schedule
-    - Early stopping based on validation loss
-    - Checkpoint saving (best model + periodic)
-    - Logging training curves to CSV for plotting
-    - Gradient clipping to prevent explosion
-
-Usage:
-    python nn_train.py --data_dir ./training_data --epochs 50 --batch_size 8
-
-    # Resume from checkpoint:
-    python nn_train.py --data_dir ./training_data --resume checkpoints/best_model.pt
-
-    # Smaller model for limited GPU:
-    python nn_train.py --data_dir ./training_data --base_channels 16 --batch_size 4
-"""
-
 from __future__ import annotations
 import os, sys, time, json, argparse, csv
 import numpy as np
@@ -35,7 +14,7 @@ from .nn_phase_model import PhaseUNet3D, BCDIPhaseLoss, count_parameters
 def train_one_epoch(
     model, loader, loss_fn, optimizer, scaler, device, epoch, max_grad_norm=1.0,
 ):
-    """Train for one epoch. Returns dict of mean losses."""
+
     model.train()
     running = {'total': 0, 'mse': 0, 'fft_consistency': 0, 'smoothness': 0}
     n_batches = 0
@@ -76,7 +55,7 @@ def train_one_epoch(
 
 @torch.no_grad()
 def validate(model, loader, loss_fn, device):
-    """Validate. Returns dict of mean losses."""
+
     model.eval()
     running = {'total': 0, 'mse': 0, 'fft_consistency': 0, 'smoothness': 0}
     n_batches = 0
@@ -99,7 +78,6 @@ def validate(model, loader, loss_fn, device):
 
 
 def save_checkpoint(model, optimizer, scheduler, scaler, epoch, val_loss, path):
-    """Save training state for resuming."""
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -111,7 +89,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, val_loss, path):
 
 
 def load_checkpoint(path, model, optimizer=None, scheduler=None, scaler=None):
-    """Load training state."""
+
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     if optimizer and 'optimizer_state_dict' in ckpt:
@@ -139,36 +117,7 @@ def train(
     max_samples: int = None,
     seed: int = 42,
 ):
-    """
-    Full training loop.
 
-    Parameters
-    ----------
-    data_dir : str
-        Directory with .npz training samples.
-    output_dir : str
-        Directory for checkpoints and logs.
-    epochs : int
-        Maximum training epochs.
-    batch_size : int
-        Batch size (reduce if OOM).
-    lr : float
-        Initial learning rate.
-    base_channels : int
-        U-Net base channels (32=~1.9M params, 16=~0.5M params).
-    loss_alpha, loss_beta, loss_gamma : float
-        Loss component weights.
-    patience : int
-        Early stopping patience (epochs without improvement).
-    resume : str or None
-        Path to checkpoint to resume from.
-    num_workers : int
-        DataLoader workers.
-    max_samples : int or None
-        Limit dataset size (for debugging).
-    seed : int
-        Random seed.
-    """
     # Setup
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

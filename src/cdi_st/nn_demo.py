@@ -1,35 +1,11 @@
-"""
-nn_demo.py — End-to-end demonstration of the NN-accelerated BCDI pipeline.
-
-This script ties everything together:
-    1. Generate a small training dataset (50 samples for demo)
-    2. Train the U-Net for a few epochs
-    3. Run phase retrieval in all 3 modes
-    4. Compare results and plot
-
-For a real workflow, you would:
-    - Generate 2000+ samples:  python nn_data_generator.py --num_samples 2000
-    - Train for 50+ epochs:    python nn_train.py --epochs 50
-    - Reconstruct:             python nn_phase_retrieval.py --input data.npz --mode hybrid
-
-Usage:
-    python nn_demo.py                          # Full demo
-    python nn_demo.py --skip_training          # Skip to reconstruction (needs trained model)
-    python nn_demo.py --num_samples 200        # More training data
-    python nn_demo.py --material Au            # Focus on gold nanocrystals
-"""
-
 from __future__ import annotations
 import os, sys, argparse, time
 import numpy as np
 from pathlib import Path
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 1: Generate training data
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def step_generate(num_samples=50, grid_size=64, material=None, output_dir='./demo_data'):
-    """Generate training samples using bcdi_core."""
+
     from cdi_st.nn_data_generator import generate_dataset
 
     print("\n" + "█" * 60)
@@ -47,13 +23,10 @@ def step_generate(num_samples=50, grid_size=64, material=None, output_dir='./dem
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 2: Train the U-Net
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def step_train(data_dir='./demo_data', output_dir='./demo_checkpoints',
                epochs=10, batch_size=4):
-    """Train the phase prediction U-Net."""
+
     from nn_train import train
 
     print("\n" + "█" * 60)
@@ -76,12 +49,8 @@ def step_train(data_dir='./demo_data', output_dir='./demo_checkpoints',
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 3: Reconstruct and compare
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def step_reconstruct(test_sample_path, model_path='./demo_checkpoints/best_model.pt'):
-    """Run phase retrieval in all 3 modes and compare."""
     from cdi_st.nn_phase_retrieval import HybridPhaseRetriever
 
     print("\n" + "█" * 60)
@@ -143,12 +112,7 @@ def step_reconstruct(test_sample_path, model_path='./demo_checkpoints/best_model
     return results
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 4: Plot results
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def step_plot(results, test_sample_path, output_dir='./demo_results'):
-    """Generate comparison plots."""
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -252,10 +216,6 @@ def step_plot(results, test_sample_path, output_dir='./demo_results'):
 
     plt.close('all')
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description='BCDI NN Phase Retrieval Demo')

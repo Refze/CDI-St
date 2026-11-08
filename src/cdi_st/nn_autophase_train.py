@@ -1,31 +1,3 @@
-"""
-nn_autophase_train.py — Unsupervised training for AutoPhaseNet3D.
-
-Trains the dual-decoder network WITHOUT requiring ground-truth phase or
-support. Only the measured diffraction magnitude is used.
-
-Training loop:
-    1. Input diffraction magnitude → encoder
-    2. Predict amplitude and phase
-    3. Physics forward model:  ρ(r) = A·S·e^{iφ} → FFT → |F|_pred
-    4. Loss = MAE(|F|_pred, |F|_measured)
-    5. Backprop through the physics model AND the network
-
-This is a direct implementation of the AutoPhaseNN training procedure
-(Yao et al., npj Comp Mat 2022), adapted to work with your existing
-dataset structure.
-
-Usage:
-    # From scratch on simulated data (no phase_true needed):
-    python nn_autophase_train.py --data_dir ./training_data --epochs 60
-
-    # Fine-tune on experimental data (loaded from .npz or .h5):
-    python nn_autophase_train.py \\
-        --data_dir ./experimental_data \\
-        --resume checkpoints_autophase/best_model.pt \\
-        --lr 1e-5 --epochs 30
-"""
-
 from __future__ import annotations
 import os, sys, time, json, argparse, csv
 import numpy as np
@@ -47,19 +19,7 @@ from .nn_autophase_model import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class UnsupervisedBCDIDataset(Dataset):
-    """
-    Dataset that ONLY loads the measured diffraction magnitude.
 
-    Works with:
-        - .npz files from nn_data_generator.py (simulated)
-        - .npz files exported from .h5 via nn_experimental_loader.py
-        - raw .h5 files from ID01 beamline (auto-detected)
-
-    Returns a dict with:
-        'input'   : log-normalized diffraction magnitude [1, N, N, N]
-        'measured': linear-scale diffraction magnitude   [1, N, N, N]
-        'amp_scale': normalization factor for reconstruction
-    """
 
     def __init__(
         self,

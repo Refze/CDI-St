@@ -1,39 +1,3 @@
-"""
-nn_autophase_infer.py — Inference and hybrid refinement for AutoPhaseNet3D.
-
-Runs the trained unsupervised network on new data (simulated or experimental),
-optionally followed by iterative refinement (ER + RAAR) from your existing
-nn_phase_retrieval module.
-
-Three modes:
-    1. 'nn_only'  — just the network forward pass (~100 ms, like AutoPhaseNN Fig 3b)
-    2. 'refined'  — NN prediction + short refinement (AutoPhaseNN + your RAAR)
-    3. 'compare'  — run all modes and compare quality metrics
-
-Works with:
-    - .npz files from your data generator (any sample)
-    - .npz files converted from experiment via nn_experimental_loader.py
-    - .h5 files directly (ID01 / 34-ID-C format, auto-loaded)
-
-Usage:
-    # On a simulated test sample:
-    python nn_autophase_infer.py \\
-        --input training_data/sample_00123.npz \\
-        --model checkpoints_autophase/best_model.pt \\
-        --output recon_autophase.npz \\
-        --mode refined
-
-    # On an experimental .h5 file:
-    python nn_autophase_infer.py \\
-        --input scan_042.h5 \\
-        --model checkpoints_autophase/best_model.pt \\
-        --output recon_exp.npz \\
-        --mode refined
-
-    # Compare NN-only vs refined:
-    python nn_autophase_infer.py --input data.npz --model best.pt --mode compare
-"""
-
 from __future__ import annotations
 import argparse, time
 import numpy as np
@@ -66,18 +30,7 @@ class AutoPhaseResult:
 
 def load_input(path: str, target_size: int = 64,
                 apply_gap_mask: bool = True) -> tuple:
-    """
-    Load a diffraction volume from .npz or .h5.
 
-    Returns (diffraction, truth_dict_or_none, voxel_size_nm_or_none).
-    `truth_dict` contains phase_true/support if available (simulated data).
-    `voxel_size_nm` is a 3-vector (per axis) if available, else None.
-
-    If `apply_gap_mask` and the data has NO ground truth (i.e. it's
-    experimental rather than simulated), runs the detector-gap heuristic
-    on the loaded volume. This catches multi-chip detector gaps that
-    survived an earlier .npz conversion.
-    """
     p = Path(path)
 
     if p.suffix == '.npz':
@@ -141,22 +94,7 @@ def nn_only_infer(
     support_threshold: float = 0.05,
     support_method: str = 'percentile',
 ) -> AutoPhaseResult:
-    """
-    Run the trained AutoPhaseNet3D in pure prediction mode (no refinement).
 
-    Improvements vs naive amplitude-threshold support:
-    - 'percentile' support method: keeps the top X% of voxels by amplitude,
-      which preserves SHAPE (cube stays cube, hexagon stays hexagon) instead
-      of forcing roundness through threshold-based truncation.
-    - Crystal-aware target support fraction estimated from autocorrelation
-      of the measured diffraction (gives realistic crystal volume).
-
-    support_method:
-        'percentile' — keep top N voxels (N estimated from autocorrelation)
-                       Best for general use, preserves shape best.
-        'threshold'  — keep voxels above support_threshold * amp.max()
-                       Original behavior, can clip cubes/hexagons.
-    """
     t0 = time.time()
     device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
 
@@ -339,21 +277,8 @@ def nn_only_infer(
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Hybrid refinement (NN + RAAR + ER from your existing module)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def _center_object(obj_3d, amp, phase, support, voxel_threshold=0.10):
-    """
-    Shift the reconstruction so its center-of-mass lands on the grid center.
 
-    Phase retrieval algorithms have a translation ambiguity: any spatial
-    shift of the object produces the same diffraction magnitude. Without
-    explicit centering, the object can end up anywhere in the volume —
-    making the central XY/XZ/YZ slices show empty regions.
-
-    Returns the shifted (object_3d, amplitude, phase, support).
-    """
     from scipy.ndimage import center_of_mass, shift as nd_shift
     import numpy as _np
 
@@ -405,29 +330,7 @@ def refined_infer(
     max_support_fraction: float = 0.20,
     algorithm: str = 'hybrid',
 ) -> AutoPhaseResult:
-    """
-    AutoPhaseNet prediction + iterative refinement (HIO + RAAR + ER).
 
-    Why this works when "RAAR + ER alone" fails on a partial NN solution:
-
-    1. The NN gives a partial reconstruction (R~0.6) that's stuck in a local
-       minimum. RAAR alone can't always escape.
-
-    2. HIO (Fienup 1982) is more aggressive: it uses negative feedback outside
-       the support, which is much better at escaping local minima than RAAR.
-       Standard practice in BCDI is HIO → RAAR → ER, not RAAR alone.
-
-    3. We preserve the NN's amplitude prediction (not just phase) as the
-       starting amplitude. This was being thrown away in the previous version.
-
-    4. We track the best iterate by R-factor and return that one, since
-       HIO/RAAR oscillate.
-
-    Schedule (matches Argonne 34-ID-C standard pipeline):
-        n_hio iterations of HIO (default 50)   — escape local minima
-        n_raar iterations of RAAR (default 50) — smooth refinement
-        n_er  iterations of ER (default 20)    — final polish
-    """
     t0 = time.time()
 
     # Step 1: NN prediction
@@ -572,15 +475,7 @@ def supervised_nn_infer(
     base_channels: int = 32,
     device: str = None,
 ) -> AutoPhaseResult:
-    """
-    Inference using the SUPERVISED PhaseUNet3D model (predicts phase only,
-    using ground-truth phase labels during training).
 
-    This is complementary to AutoPhaseNet3D (unsupervised, dual-decoder).
-    The supervised model often has better phase prediction inside the
-    support but doesn't predict amplitude — we derive amplitude from
-    autocorrelation seed.
-    """
     t0 = time.time()
     device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
 
@@ -664,31 +559,7 @@ def ensemble_infer(
     n_er: int = 20,
     weight_strategy: str = 'auto',
 ) -> AutoPhaseResult:
-    """
-    Ensemble two complementary networks:
-        - AutoPhaseNet3D (unsupervised, predicts amplitude AND phase)
-        - PhaseUNet3D    (supervised, predicts phase only)
 
-    Then optionally refine with HIO/RAAR/ER.
-
-    Strategy:
-        1. Run both networks independently
-        2. Combine: average phases (weighted), use AutoPhaseNet's amplitude
-           (since supervised model doesn't predict amplitude well)
-        3. Build initial support from union of both models' supports
-        4. Optionally feed combined object to RAAR refinement
-
-    Why this helps: the two models have different biases. AutoPhaseNet sees
-    only the diffraction so it learns physics; supervised model sees ground
-    truth so it learns shape priors. Their errors are largely independent,
-    so averaging reduces variance.
-
-    weight_strategy:
-        'auto'   — weight by inverse R-factor of each model
-        'equal'  — 50/50
-        'autophase' — only use AutoPhaseNet (fallback if supervised fails)
-        'supervised' — only use supervised
-    """
     t0 = time.time()
 
     # Run both models

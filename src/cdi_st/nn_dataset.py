@@ -1,31 +1,3 @@
-"""
-nn_dataset.py — PyTorch Dataset for BCDI phase retrieval training.
-
-Loads the .npz files created by nn_data_generator.py and prepares them
-for training the U-Net phase predictor.
-
-Input to the network:
-    - log10(amplitude + 1), normalized to [0, 1]  → shape [1, N, N, N]
-
-Target:
-    - phase field (ground truth)                   → shape [1, N, N, N]
-    - support mask                                 → shape [1, N, N, N]
-
-Augmentations (applied randomly during training):
-    - Random 90° rotations along each axis
-    - Random flips along each axis
-    - Gaussian noise on the input amplitude
-
-These augmentations exploit the fact that BCDI diffraction patterns have
-symmetry under rotation/flip (Friedel's law in centrosymmetric cases),
-and the physics is invariant to these transformations.
-
-Usage:
-    from cdi_st.nn_dataset import BCDIDataset
-    ds = BCDIDataset('./training_data', augment=True)
-    loader = torch.utils.data.DataLoader(ds, batch_size=8, shuffle=True)
-"""
-
 from __future__ import annotations
 import os, json
 import numpy as np
@@ -36,14 +8,6 @@ from typing import Optional, Tuple
 
 
 class BCDIDataset(Dataset):
-    """
-    PyTorch Dataset for BCDI (amplitude → phase) training pairs.
-
-    Each sample contains:
-        input:  log-scaled amplitude  [1, N, N, N]  float32
-        target: ground-truth phase    [1, N, N, N]  float32
-        support: binary mask          [1, N, N, N]  float32
-    """
 
     def __init__(
         self,
@@ -53,26 +17,6 @@ class BCDIDataset(Dataset):
         max_samples: int = None,
         grid_size: int = None,
     ):
-        """
-        Parameters
-        ----------
-        data_dir : str
-            Directory containing sample_XXXXX.npz files.
-        augment : bool
-            Apply random augmentations (rotations, flips, noise).
-        normalize_phase : bool
-            Normalize phase to [-1, 1] range (divide by π).
-        max_samples : int or None
-            Limit number of samples loaded (for debugging).
-        grid_size : int or None
-            Expected NxNxN grid size of each sample. If set, samples whose
-            shape doesn't match are skipped (with a warning) instead of
-            crashing later in the data loader. If None (default), all
-            samples are loaded regardless of size — relies on the dataset
-            being internally consistent (the data generator enforces this).
-            Accepted here primarily for API compatibility with
-            UnsupervisedBCDIDataset and the GUI training worker.
-        """
         self.data_dir = Path(data_dir)
         self.augment = augment
         self.normalize_phase = normalize_phase
@@ -154,14 +98,6 @@ class BCDIDataset(Dataset):
         phase: np.ndarray,
         support: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Apply physics-respecting augmentations.
-
-        Rotations and flips are valid because:
-          - The diffraction pattern of a rotated/flipped crystal
-            is the rotated/flipped diffraction pattern
-          - Phase changes sign under inversion (Friedel's law)
-        """
         rng = np.random.default_rng()
 
         # Random 90° rotations (0, 1, 2, or 3 times) for each axis pair
@@ -202,30 +138,6 @@ def create_dataloaders(
     max_samples: int = None,
     seed: int = 42,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """
-    Create train/val/test dataloaders from a directory of .npz files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory with sample_XXXXX.npz files.
-    batch_size : int
-        Batch size for training.
-    val_fraction : float
-        Fraction of data for validation.
-    test_fraction : float
-        Fraction of data for testing.
-    num_workers : int
-        Number of dataloader workers.
-    max_samples : int or None
-        Limit dataset size.
-    seed : int
-        Random seed for splitting.
-
-    Returns
-    -------
-    (train_loader, val_loader, test_loader)
-    """
     # Full dataset (no augmentation for splitting)
     full_ds = BCDIDataset(data_dir, augment=False, max_samples=max_samples)
 

@@ -1,40 +1,3 @@
-"""
-nn_phase_model.py — Lightweight 3D U-Net for BCDI phase prediction.
-
-Architecture:
-    Input:  log-scaled diffraction amplitude  [B, 1, N, N, N]
-    Output: predicted phase field              [B, 1, N, N, N]
-
-    Encoder path:  1 → 32 → 64 → 128 channels (3 levels)
-    Bottleneck:    256 channels
-    Decoder path:  128 → 64 → 32 → 1 channels (skip connections from encoder)
-    Final:         tanh activation (phase ∈ [-1, 1], multiply by π to get radians)
-
-Design choices:
-    - Lightweight: ~1.9M parameters (fits on RTX 3070 with batch_size=8 at N=64)
-    - Instance normalization instead of batch norm (more stable for small batches)
-    - LeakyReLU activations (avoids dead neurons in phase regions)
-    - Skip connections preserve high-frequency fringe information
-    - tanh output naturally constrains phase to bounded range
-
-The model predicts phase INSIDE the support. Outside the support, phase is
-meaningless, so the loss function should mask with the support.
-
-Why U-Net for phase retrieval:
-    The encoder captures the global structure of the diffraction pattern
-    (overall shape, symmetry), while the decoder reconstructs local phase
-    variations (strain fields, dislocations). Skip connections allow the
-    decoder to reference fine fringes in the input when building the phase map.
-
-Usage:
-    from cdi_st.nn_phase_model import PhaseUNet3D, count_parameters
-    model = PhaseUNet3D(in_channels=1, base_channels=32)
-    print(f"Parameters: {count_parameters(model):,}")
-
-    x = torch.randn(4, 1, 64, 64, 64)  # batch of 4, grid 64³
-    phase_pred = model(x)               # → [4, 1, 64, 64, 64]
-"""
-
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -42,14 +5,7 @@ import torch.nn.functional as F
 
 
 class ConvBlock3D(nn.Module):
-    """
-    Two 3x3x3 convolutions with instance norm and LeakyReLU.
 
-    InstanceNorm is preferred over BatchNorm for BCDI because:
-    - Batch sizes are typically small (4-16) due to 3D volume memory
-    - Each sample has very different intensity scales
-    - InstanceNorm normalizes per-sample, per-channel
-    """
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.conv = nn.Sequential(
@@ -77,12 +33,7 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
-    """
-    Upsample by 2x, concatenate skip connection, then double conv block.
 
-    Uses trilinear interpolation for upsampling (smoother than transposed conv
-    for continuous phase fields — avoids checkerboard artifacts).
-    """
     def __init__(self, in_ch: int, skip_ch: int, out_ch: int):
         super().__init__()
         self.conv = ConvBlock3D(in_ch + skip_ch, out_ch)
@@ -96,36 +47,6 @@ class UpBlock(nn.Module):
 
 
 class PhaseUNet3D(nn.Module):
-    """
-    3D U-Net for predicting BCDI phase from diffraction amplitude.
-
-    Architecture (for base_channels=32, N=64):
-
-        Input [1, 64, 64, 64]
-          ├─ ConvBlock → [32, 64, 64, 64]    ← skip1
-          ├─ DownBlock → [64, 32, 32, 32]    ← skip2
-          ├─ DownBlock → [128, 16, 16, 16]   ← skip3
-          ├─ DownBlock → [256, 8, 8, 8]      ← bottleneck
-          ├─ UpBlock   → [128, 16, 16, 16]   (+ skip3)
-          ├─ UpBlock   → [64, 32, 32, 32]    (+ skip2)
-          ├─ UpBlock   → [32, 64, 64, 64]    (+ skip1)
-          └─ Conv 1x1  → [1, 64, 64, 64]     + tanh
-
-    Parameters: ~1.9M (at base_channels=32)
-    Memory:     ~1.2 GB per sample at N=64
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input channels (1 for amplitude-only).
-    out_channels : int
-        Number of output channels (1 for phase).
-    base_channels : int
-        Number of channels in first encoder level. Doubles each level.
-        32 → ~1.9M params (recommended for N=64, GPU ≥ 8GB)
-        48 → ~4.2M params (for N=64, GPU ≥ 12GB)
-        64 → ~7.5M params (for N=64, GPU ≥ 16GB)
-    """
 
     def __init__(
         self,
@@ -158,19 +79,7 @@ class PhaseUNet3D(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass.
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input amplitude, shape [B, 1, N, N, N].
-
-        Returns
-        -------
-        torch.Tensor
-            Predicted phase (normalized to [-1, 1]), shape [B, 1, N, N, N].
-        """
         # Encoder
         s1 = self.enc1(x)             # [B, C,  N,   N,   N]
         s2 = self.enc2(s1)            # [B, 2C, N/2, N/2, N/2]
@@ -193,28 +102,7 @@ class PhaseUNet3D(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class BCDIPhaseLoss(nn.Module):
-    """
-    Combined loss for BCDI phase prediction.
 
-    Components:
-    1. Masked MSE loss on phase: |phase_pred - phase_true|² inside the
-       support only (phase outside the crystal is physically meaningless).
-       Controlled by ``alpha_amp`` (alias: ``alpha``).
-
-    2. FFT consistency loss: the predicted phase + measured amplitude should
-       produce a real-space object that is consistent with the support.
-       Acts as a physics-informed regularizer.
-       Controlled by ``beta_phase`` (alias: ``beta``).
-
-    3. Gradient smoothness loss: penalizes sharp phase jumps inside the
-       support (real strain fields are smooth, not noisy).
-       Controlled by ``gamma_diff`` (alias: ``gamma``).
-
-    Parameters can be passed using either the descriptive names
-    (``alpha_amp``, ``beta_phase``, ``gamma_diff``) used in the GUI, or
-    the Greek-letter aliases (``alpha``, ``beta``, ``gamma``) used in
-    the original API. Descriptive names take precedence if both are passed.
-    """
 
     def __init__(self,
                  alpha_amp: float = None, beta_phase: float = None,
@@ -235,21 +123,7 @@ class BCDIPhaseLoss(nn.Module):
         amplitude: torch.Tensor = None,
         diff_amp: torch.Tensor = None,
     ) -> dict:
-        """
-        Compute combined loss.
 
-        Parameters
-        ----------
-        phase_pred : [B, 1, N, N, N]  predicted phase (normalized [-1, 1])
-        phase_true : [B, 1, N, N, N]  ground truth phase (normalized [-1, 1])
-        support    : [B, 1, N, N, N]  binary support mask
-        amplitude  : [B, 1, N, N, N]  measured amplitude (for FFT loss).
-                     Accepted as either ``amplitude=`` or ``diff_amp=``.
-
-        Returns
-        -------
-        dict with 'total', 'mse', 'fft_consistency', 'smoothness'
-        """
         # Accept either keyword for the amplitude tensor
         if amplitude is None and diff_amp is not None:
             amplitude = diff_amp

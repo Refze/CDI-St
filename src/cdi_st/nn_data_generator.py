@@ -1,26 +1,3 @@
-"""
-nn_data_generator.py — Generate training data for NN-accelerated BCDI phase retrieval.
-
-Uses bcdi_core.py to create thousands of (support, phase, diffraction_pattern) triplets
-by randomizing:
-  - Material (from MATERIAL_PRESETS)
-  - Crystal shape (cube, sphere, cylinder, hexagonal)
-  - Supercell size (controls particle size → fringe spacing)
-  - Strain type and magnitude
-  - Dislocation parameters
-  - Reflection (hkl)
-
-Each sample is saved as a compressed .npz file containing:
-  - 'amplitude': sqrt(diffraction_intensity), shape [N, N, N]
-  - 'phase_true': the ground-truth phase field, shape [N, N, N]
-  - 'support': binary support mask, shape [N, N, N]
-  - 'diffraction': the full diffraction volume, shape [N, N, N]
-  - 'metadata': dict with generation parameters
-
-Usage:
-    python nn_data_generator.py --output_dir ./training_data --num_samples 2000 --grid_size 64
-"""
-
 from __future__ import annotations
 import os, sys, json, argparse, time
 import numpy as np
@@ -35,24 +12,17 @@ from .bcdi_core import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Random parameter samplers
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def random_material(rng: np.random.Generator) -> str:
-    """Pick a random material from presets."""
     names = list(MATERIAL_PRESETS.keys())
     return rng.choice(names)
 
 
 def random_shape(material_name: str, rng: np.random.Generator) -> str:
-    """Pick a compatible random shape for the material."""
     shapes = compatible_shapes(material_name)
     return rng.choice(shapes)
 
 
 def random_supercell(rng: np.random.Generator, min_n: int = 10, max_n: int = 30) -> tuple:
-    """Random supercell multipliers. Keeps aspect ratio reasonable."""
     nx = rng.integers(min_n, max_n + 1)
     ny = rng.integers(min_n, max_n + 1)
     nz = rng.integers(min_n, max_n + 1)
@@ -60,7 +30,6 @@ def random_supercell(rng: np.random.Generator, min_n: int = 10, max_n: int = 30)
 
 
 def random_strain(rng: np.random.Generator) -> tuple:
-    """Random strain type and magnitude."""
     strain_types = ['none', 'none', 'radial_gradient', 'edge_dislocation', 'random']
     # Weight 'none' more heavily for balanced training
     stype = rng.choice(strain_types)
@@ -71,7 +40,6 @@ def random_strain(rng: np.random.Generator) -> tuple:
 
 
 def random_dislocation(rng: np.random.Generator, lattice_a: float) -> Optional[DislocationConfig]:
-    """Randomly decide whether to add a dislocation, and configure it."""
     if rng.random() < 0.6:  # 60% no dislocation
         return None
     dtype = rng.choice(['edge', 'screw', 'mixed'])
@@ -87,7 +55,6 @@ def random_dislocation(rng: np.random.Generator, lattice_a: float) -> Optional[D
 
 
 def random_reflection(reflections_df, rng: np.random.Generator):
-    """Pick a reflection, biased toward high-intensity ones."""
     if len(reflections_df) == 0:
         return None
     # Prefer BCDI-flagged reflections
@@ -99,10 +66,6 @@ def random_reflection(reflections_df, rng: np.random.Generator):
     return row['hkl']
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Core generation function
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def generate_single_sample(
     sample_id: int,
     grid_size: int = 64,
@@ -112,32 +75,6 @@ def generate_single_sample(
     randomize_dislocation: bool = True,
     randomize_strain: bool = True,
 ) -> dict:
-    """
-    Generate one (support, phase, diffraction) triplet.
-
-    Parameters
-    ----------
-    sample_id : int
-        Unique identifier for this sample.
-    grid_size : int
-        Detector grid size N (diffraction volume is NxNxN).
-    rng : numpy random generator
-        For reproducibility.
-    add_noise : bool
-        Whether to add experimental noise to some samples.
-    fixed_material : str or None
-        If set, only use this material (useful for material-specific training).
-    randomize_dislocation : bool
-        If True, occasionally add a random line dislocation to the sample.
-        If False, all samples are dislocation-free (clean crystals).
-    randomize_strain : bool
-        If True, occasionally apply random strain (radial, edge, random).
-        If False, all samples are strain-free (uniform unit cells).
-
-    Returns
-    -------
-    dict with keys: amplitude, phase_true, support, diffraction, metadata
-    """
     if rng is None:
         rng = np.random.default_rng(sample_id)
 
@@ -251,10 +188,6 @@ def generate_single_sample(
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Batch generation
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def generate_dataset(
     output_dir: str,
     num_samples: int = 2000,
@@ -266,28 +199,7 @@ def generate_dataset(
     randomize_dislocation: bool = True,
     randomize_strain: bool = True,
 ):
-    """
-    Generate a full training dataset.
 
-    Creates output_dir/sample_XXXXX.npz files and a manifest.json.
-
-    Parameters
-    ----------
-    output_dir : str
-        Directory to save .npz files.
-    num_samples : int
-        Total number of samples to generate.
-    grid_size : int
-        NxNxN grid for each diffraction volume.
-    seed : int
-        Base random seed for reproducibility.
-    fixed_material : str or None
-        Lock to one material for focused training.
-    add_noise : bool
-        Whether to add noise to some samples.
-    resume : bool
-        Skip already-generated samples.
-    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -399,9 +311,6 @@ def generate_dataset(
     print(f"{'='*60}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
