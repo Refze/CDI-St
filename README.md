@@ -4,7 +4,7 @@
 
 # CDI-ST
 
-**Coherent Diffraction Imaging — Simulation Tools**
+**Coherent Diffraction Imaging - Simulation Tools**
 
 An end-to-end Bragg Coherent Diffraction Imaging (BCDI) Python application using low computational resources with an easy to learn GUI:
 crystal lattice construction, X-ray scattering simulation, neural-network phase retrieval,
@@ -27,8 +27,8 @@ and 3D visualization, in a single GUI.
   </tr>
   <tr>
     <td align="center"><sub>Launcher</sub></td>
-    <td align="center"><sub>Material — crystal builder</sub></td>
-	<td align="center"><sub>Results — simulated Bragg peak</sub></td>
+    <td align="center"><sub>Material - crystal builder</sub></td>
+	<td align="center"><sub>Results - simulated Bragg peak</sub></td>
   </tr>
   <tr>
 	<td><img src="docs/screenshots/3d_viewer.png" width="280"/></td>
@@ -36,9 +36,9 @@ and 3D visualization, in a single GUI.
     <td><img src="docs/screenshots/reconstruction.png" width="280"/></td>
   </tr>
   <tr>
-	<td align="center"><sub>3D Viewer — diffraction simulation</sub></td>
+	<td align="center"><sub>3D Viewer - diffraction simulation</sub></td>
     <td align="center"><sub>2D reconstruction</sub></td>
-    <td align="center"><sub>3D Viewer — reconstruction</sub></td>
+    <td align="center"><sub>3D Viewer - reconstruction</sub></td>
   </tr>
 </table>
 
@@ -83,18 +83,18 @@ more recently by neural networks.
 | 3. Simulate diffraction | Compute the 3D Bragg peak | **BCDI Simulation → Results** |
 | 4. Generate training data | Build a labeled dataset of (object, diffraction) pairs | **BCDI Data Analysis → Generate Data** |
 | 5. Train an unsupervised NN | AutoPhase_NN: physics-driven, no ground truth | **BCDI Data Analysis → AutoPhase_NN** |
-| 6. Train a supervised NN | CDI_NN: PhaseUNet3D learning the phase mapping | **BCDI Data Analysis → CDI_NN** |
-| 7. Reconstruct | NN → optionally refine with HIO/RAAR/ER | **BCDI Data Analysis → Reconstruction** |
+| 6. Train a supervised NN | CDI_NN: learning the phase mapping | **BCDI Data Analysis → CDI_NN** |
+| 7. Reconstruct | HIO/RAAR/ER on their own, or a network seed refined by them | **BCDI Data Analysis → Reconstruction** |
 | 8. Visualize and export | Interactive 3D viewer, ParaView VTI export | **BCDI Data Analysis → 3D Viewer** |
 
 ---
 
 ## The simulation pipeline
 
-### 1. Material — build the crystal
+### 1. Material : build the crystal
 
-Choose from preset materials (Si, Ge, Pt, Au, SiC, GaAs, ...) or import a custom
-CIF file. The crystal is built atom-by-atom from the unit cell, replicated to the
+Choose from the preset materials (Al, Cu, Au, Pt, W, Fe, Si, Ge, SiC (3C and 4H),
+ZnO, GaN, Te, Fe3GeTe2, Fe5GeTe2) or import any CIF file. The crystal is built atom-by-atom from the unit cell, replicated to the
 requested supercell size.
 
 You can:
@@ -107,9 +107,13 @@ You can:
 
 The 3D lattice view (powered by Plotly) shows every atom in the supercell.
 
-### 2. Beam — define the X-ray geometry
+### 2. Beam : define the X-ray geometry
 
-Select a reflection (h k l) from the auto-computed list of allowed peaks.
+Select a reflection (h k l) from the auto-computed list of allowed peaks. The
+search bounds each index separately from the geometry, so materials with a long
+c axis keep their high-l reflections — `(0 0 6)` for Fe3GeTe2, `(0 0 8)` for
+4H-SiC, `(0 0 6)` and `(0 -1 10)` for corundum. Typing any member of a family
+finds that family, whichever member the table happens to list.
 The Beam tab also lets you set:
 - **Beam energy** (and the resulting wavelength)
 - **Detector geometry**: pixel pitch, sample-to-detector distance, detector size
@@ -118,7 +122,7 @@ The Beam tab also lets you set:
 
 Detector preset auto-fills the geometry parameters.
 
-### 3. Results — run the simulation
+### 3. Results : run the simulation
 
 CDI-ST computes the diffraction in **two paths**:
 
@@ -135,7 +139,7 @@ or for use as ground truth when training NNs.
 
 ## The data-analysis pipeline
 
-### 4. Generate Data — create training samples
+### 4. Generate Data : create training samples
 
 Generates a dataset of synthetic BCDI samples for NN training. Each sample
 contains the ground-truth phase, support, and the simulated diffraction
@@ -151,7 +155,7 @@ intensity. You control:
 Samples save as `sample_XXXXX.npz` and a `manifest.json`. Generation is
 parallelizable and resumable.
 
-### 5. AutoPhase_NN — unsupervised physics-driven NN
+### 5. AutoPhase_NN : unsupervised physics-driven NN
 
 AutoPhase_NN is a 3D dual-decoder convolutional network that learns to invert the
 Fourier modulus constraint **without ground truth**. It predicts the object's
@@ -163,7 +167,7 @@ et al. npj Computational Materials 8.1 (2022) ) reimplemented for this codebase.
 Training is GPU-accelerated (CUDA preferred) and converges in a few dozen
 epochs on 2,000+ samples. The best checkpoint is saved automatically.
 
-### 6. CDI_NN — supervised PhaseUNet3D
+### 6. CDI_NN : supervised PhaseUNet3D
 
 A 3D U-Net that predicts the phase field from the diffraction magnitude, trained
 against the ground-truth phase from the data generator.
@@ -172,15 +176,24 @@ Use AutoPhase_NN when you don't trust your simulator's ground truth (or have
 none). Use CDI_NN when you have a high-fidelity simulator and want a direct
 mapping. Use both via the **ensemble** mode in the Reconstruction tab.
 
-### 7. Reconstruction — invert experimental or simulated data
+### 7. Reconstruction : invert experimental or simulated data
 
 Load any `.npz` (simulated) or `.h5` (experimental) BCDI file, or convert a
 SPEC + EDF scan from ID01 directly via the dialog. Choose:
 
-- **NN-only (Autophase_NN)**: forward pass, twin-image suppression, COM centering
-- **Refined**: NN seed → HIO + RAAR + ER iterative phase retrieval
-- **Ensemble**: AutoPhase_NN + CDI_NN combined, optionally refined
-- **Compare**: runs both modes side-by-side
+- **HIO/RAAR/ER only — no neural network**: the standard iterative algorithms
+  from a random start. No checkpoint, no PyTorch, nothing trained - this is the
+  option to use if you cannot run a network, and it is what most published BCDI
+  work uses.
+- **AutoPhaseNet alone**: one forward pass (~100 ms), with twin-image
+  suppression and COM centering. A quick look.
+- **AutoPhaseNet → HIO/RAAR/ER refinement**: network seed, then the classical
+  algorithms polish it. The usual choice.
+- **Both networks averaged (AutoPhaseNet + PhaseUNet3D)**, optionally refined:
+  averaging two independent guesses cancels some of the error each makes alone.
+  Needs the second checkpoint.
+
+If refinement comes out worse than the network alone, the network output is kept.
 
 The output is a complex object (amplitude + phase), a binary support, the
 R-factor convergence curve, and 2D slices at the COM of the reconstruction.
@@ -192,7 +205,7 @@ For experimental data, the loader handles:
 - Bragg-peak-centered cropping
 - Optional q-space orthogonalization via xrayutilities (with `[id01]` extra)
 
-### 8. 3D Viewer — interactive visualization
+### 8. 3D Viewer : interactive visualization
 
 The viewer renders the reconstruction in three modes:
 
@@ -201,44 +214,21 @@ The viewer renders the reconstruction in three modes:
 - **Isosurface**: smoothed iso-shell with internal data points showing through
 - **Surface only**: bare iso-mesh with edges visible
 
+**Render quality** is chosen before rendering - Draft (15,000 points), Standard
+(60,000, the default), High (200,000) or Maximum (1,000,000). Higher settings also
+smooth the isosurface less, so density and strain stay distinguishable. On a 128³
+reconstruction with 268,000 support voxels these take roughly 0.4 s, 0.5 s, 1.4 s
+and 1.4 s.
+
 Controls:
-- Threshold (% of peak amplitude), voxel size, opacity, colormap
+- Threshold (% of peak amplitude), voxel size, opacity, colormap (Turbo by default)
 - Color scale auto / manual (`vmin` / `vmax`)
 - Clip plane on any axis
+- **Auto-update view**: re-renders as soon as a setting changes, instead of
+  pressing "Update view". Changes are coalesced briefly so dragging a slider does
+  not start a render on every step.
 - Mouse: left-drag rotate, right-drag pan, wheel zoom, double-click reset
 - Export PNG snapshot or VTI (ParaView)
-
----
-
-## Project structure
-
-```
-cdi-st/
-├── src/cdi_st/
-│   ├── __init__.py
-│   ├── __main__.py              # python -m cdi_st
-│   ├── bcdi_gui.py              # main entry point + launcher + splash
-│   ├── bcdi_core.py             # crystal builder, simulator, reflection calculator
-│   ├── nn_gui_tabs.py           # all NN-related GUI tabs
-│   ├── nn_data_generator.py     # training-data generator
-│   ├── nn_dataset.py            # PyTorch Dataset wrapper
-│   ├── nn_phase_model.py        # PhaseUNet3D (supervised)
-│   ├── nn_autophase_model.py    # AutoPhaseNet3D (unsupervised)
-│   ├── nn_train.py              # supervised training CLI
-│   ├── nn_autophase_train.py    # unsupervised training CLI
-│   ├── nn_phase_retrieval.py    # HIO / RAAR / ER iterative algorithms
-│   ├── nn_autophase_infer.py    # inference: nn_only / refined / ensemble
-│   ├── nn_experimental_loader.py # h5/spec/edf loading + preprocessing
-│   ├── nn_demo.py
-│   ├── nn_visualize.py
-│   └── CDI_ST_logo.png
-├── tests/
-├── docs/
-├── pyproject.toml
-├── README.md
-├── LICENSE
-└── CHANGELOG.md
-```
 
 ---
 
@@ -264,7 +254,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-**Soufiane SAIDI** — saidisoufiane@hotmail.com
+**Soufiane SAIDI** - saidisoufiane@hotmail.com
 
 We heavily encourage you to use the in-app **Reports & Suggestions** button to send any type of feedback.
 
@@ -276,4 +266,4 @@ Built on the shoulders of the BCDI and python community:
 [PyNX](https://pynx.esrf.fr/), [BCDI-Utilities](https://github.com/carnisj/bcdi),
 [cdiutils](https://github.com/clatlan/cdiutils), [Atomsk](https://atomsk.univ-lille.fr/) , [xrayutilities](https://xrayutilities.sourceforge.io/),
 [scikit-image](https://scikit-image.org/), [PyQt6](https://www.riverbankcomputing.com/software/pyqt/),
-and the AutoPhaseNN paper by Yao et al. (2022).
+and the AutoPhaseNN paper by Yao et al.(2022) (https://doi.org/10.1038/s41524-022-00803-w).

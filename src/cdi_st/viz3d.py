@@ -63,7 +63,7 @@ def cut_face(fig, vol, q, axis, index, cmap, lo, hi, opacity=1.0):
     return fig
 
 
-def volume_fig(vol, q, cmap='BCDI', iso_lo_pct=75, iso_hi_pct=100, opacity=1.0,
+def volume_fig(vol, q, cmap='Turbo', iso_lo_pct=75, iso_hi_pct=100, opacity=1.0,
                surfaces=21, scope='volume', clip=None, clip_fill=True, title=''):
     """
     clip = (axis, index, side) or None.

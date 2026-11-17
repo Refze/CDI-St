@@ -1,7 +1,7 @@
 import sys, os, tempfile, json, time
 import numpy as np
 from pathlib import Path
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QSize
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QGroupBox,
@@ -29,6 +29,45 @@ MPL_DARK = {
     'axes.titlecolor': '#e6edf3', 'xtick.color': '#8b949e',
     'ytick.color': '#8b949e', 'text.color': '#e6edf3', 'font.size': 9
 }
+
+# label, max point-cloud points, max interior points, iso smoothing, surface smoothing
+VIEW_QUALITY = [
+    ("Draft — fastest",      15_000,    4_000, 1.5, 0.40),
+    ("Standard",                  60_000,   20_000, 1.2, 0.35),
+    ("High — slower",       200_000,   60_000, 0.9, 0.30),
+    ("Maximum — slowest", 1_000_000,  250_000, 0.6, 0.25),
+]
+
+
+class _ClassicalResult:
+    def __init__(self, rho, sup, errs, method, elapsed):
+        self.object_3d = rho; self.amplitude = np.abs(rho); self.phase = np.angle(rho)
+        self.support = np.asarray(sup, np.float32)
+        self.error_metric = [float(x) for x in errs]
+        self.method = method; self.elapsed_seconds = elapsed
+
+
+def _load_diffraction(path):
+    # classical path: read the intensity volume without importing torch
+    e = os.path.splitext(path)[1].lower()
+    if e == '.npy': return np.asarray(np.load(path), np.float32)
+    if e == '.npz':
+        z = np.load(path)
+        for k in ('diffraction', 'diffraction_volume', 'data', 'intensity'):
+            if k in z: return np.asarray(z[k], np.float32)
+        if 'amplitude' in z: return np.asarray(z['amplitude'], np.float32) ** 2
+        raise KeyError(f"no diffraction array in {path}; keys={list(z.keys())}")
+    if e in ('.h5', '.hdf5', '.cxi', '.nxs'):
+        import h5py
+        with h5py.File(path, 'r') as f:
+            hit = []
+            f.visit(lambda n: hit.append(n))
+            for n in hit:
+                o = f[n]
+                if hasattr(o, 'shape') and len(getattr(o, 'shape', ())) == 3:
+                    return np.asarray(o, np.float32)
+        raise KeyError('no 3-D dataset found')
+    raise ValueError(f'unsupported input format: {e}')
 
 
 def _dbl(lo, hi, v, d, suf=""):
@@ -539,38 +578,46 @@ class ReconstructionWorker(QThread):
         super().__init__()
         self.p = params
 
+    def _ckpt_grid(self, p):
+        # grid the checkpoint was trained at, or None; the model is fully
+        # convolutional so a missing value is normal for v0.1.x checkpoints
+        import torch as _torch
+        try:
+            m = _torch.load(p['model_path'], map_location='cpu', weights_only=False)
+            g = m.get('grid_size', None)
+            if g: self.log.emit(f"Model trained at grid {g}\u00b3, base_channels={m.get('base_channels')}")
+            del m
+            return g
+        except Exception:
+            return None
+
+    def _read(self, load_input, p, model_grid):
+        if load_input is None:
+            return _load_diffraction(p['input_path']), None, None
+        return load_input(p['input_path'],
+                          target_size=model_grid if model_grid else p.get('grid_size', 64))
+
     def run(self):
         try:
             p = self.p
             self.log.emit(f"Loading {p['input_path']}...")
             self.progress.emit(5)
 
-            # Load input
-            from cdi_st.nn_autophase_infer import (
-                load_input, nn_only_infer, refined_infer, ensemble_infer
-            )
+            mode = p['mode']
+            load_input = None; model_grid = None
+            if mode == 'classical':
+                # no network: never import torch, never read a checkpoint
+                try:
+                    from cdi_st.nn_autophase_infer import load_input
+                except Exception:
+                    self.log.emit("PyTorch not available \u2014 reading the volume directly")
+            else:
+                from cdi_st.nn_autophase_infer import (
+                    load_input, nn_only_infer, refined_infer, ensemble_infer
+                )
+                model_grid = self._ckpt_grid(p)
 
-            # Read model checkpoint to find its trained grid size (if available)
-            import torch as _torch
-            try:
-                _ckpt_meta = _torch.load(p['model_path'], map_location='cpu', weights_only=False)
-                model_grid = _ckpt_meta.get('grid_size', None)
-                model_channels = _ckpt_meta.get('base_channels', None)
-                if model_grid:
-                    self.log.emit(f"Model trained at grid {model_grid}\u00b3, base_channels={model_channels}")
-                # Old checkpoints without grid_size metadata: the model is
-                # fully convolutional so it runs at the input's native size.
-                # Don't log a warning — that's the normal state for v0.1.x
-                # checkpoints. The check is silent unless something actually
-                # goes wrong (handled later in inference).
-                del _ckpt_meta
-            except Exception:
-                model_grid = None
-
-            diffraction, truth, voxel_nm = load_input(
-                p['input_path'],
-                target_size=model_grid if model_grid else p.get('grid_size', 64),
-            )
+            diffraction, truth, voxel_nm = self._read(load_input, p, model_grid)
             N_in = diffraction.shape[0]
             if voxel_nm is not None:
                 self.log.emit(f"Input voxel pitch: {np.asarray(voxel_nm).mean():.3f} nm/voxel")
@@ -596,8 +643,20 @@ class ReconstructionWorker(QThread):
 
             self.progress.emit(15)
 
-            mode = p['mode']
-            if mode == 'nn_only':
+            if mode == 'classical':
+                import cdi_st.recon as _rc
+                rec = f"HIO:{p.get('n_hio',50)},RAAR:{p['n_raar']},ER:{p['n_er']}"
+                self.log.emit(f"Classical phase retrieval, no network: {rec}")
+                t0 = time.time()
+                tot = max(sum(n for _, n in _rc.parse_recipe(rec)), 1)
+                def _cb(i, algo, err, sf):
+                    if i % 5 == 0: self.progress.emit(15 + int(70 * i / tot))
+                    if i % 25 == 0:
+                        self.log.emit(f"{algo} {i}/{tot}  chi2={err:.3e}  support={sf*100:.1f}%")
+                rho, sup, errs = _rc.retrieve(diffraction, recipe=rec, cb=_cb)
+                rho = _rc.remove_ramp(rho, sup)
+                result = _ClassicalResult(rho, sup, errs, f'classical {rec} (no NN)', time.time() - t0)
+            elif mode == 'nn_only':
                 self.log.emit("AutoPhaseNet forward pass (no refinement)...")
                 result = nn_only_infer(
                     diffraction, p['model_path'],
@@ -1982,16 +2041,30 @@ class T5(QWidget):
         pr = QHBoxLayout()
         pr.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["refined", "nn_only", "ensemble", "ensemble+refine"])
+        for _lbl, _key in [
+            ("AutoPhaseNet \u2192 HIO/RAAR/ER refinement", "refined"),
+            ("AutoPhaseNet alone (fast, rough)", "nn_only"),
+            ("HIO/RAAR/ER only \u2014 no neural network", "classical"),
+            ("Both networks averaged (AutoPhaseNet + PhaseUNet3D)", "ensemble"),
+            ("Both networks averaged \u2192 HIO/RAAR/ER refinement", "ensemble+refine"),
+        ]:
+            self.mode_combo.addItem(_lbl, _key)
         self.mode_combo.setToolTip(
-            "Reconstruction strategy:\n"
-            "\u2022 nn_only: just AutoPhaseNet forward pass (~100ms, rough)\n"
-            "\u2022 refined: AutoPhaseNet \u2192 HIO \u2192 RAAR \u2192 ER (most common)\n"
-            "\u2022 ensemble: combine AutoPhaseNet + supervised PhaseUNet3D\n"
-            "\u2022 ensemble+refine: ensemble \u2192 HIO/RAAR/ER\n\n"
-            "Ensemble modes need Model 2 to be set (supervised checkpoint).\n"
-            "If 'refined' is worse than 'nn_only', automatic fallback to NN output."
+            "How the phases are recovered:\n\n"
+            "\u2022 AutoPhaseNet \u2192 HIO/RAAR/ER: the network guesses the phases, then the\n"
+            "  classical algorithms polish them. The usual choice.\n"
+            "\u2022 AutoPhaseNet alone: one forward pass (~100 ms). Quick look, rough result.\n"
+            "\u2022 HIO/RAAR/ER only: the standard iterative algorithms from a random\n"
+            "  start, with no network and no checkpoint file. Slower, needs nothing\n"
+            "  trained, and is what most published BCDI work uses.\n"
+            "\u2022 Both networks averaged: run AutoPhaseNet and the supervised\n"
+            "  PhaseUNet3D on the same data and average the two results. Averaging two\n"
+            "  independent guesses cancels some of the error each one makes on its own.\n"
+            "  Needs Model 2 to be set.\n"
+            "\u2022 Both networks averaged \u2192 HIO/RAAR/ER: the averaged guess, then polished.\n\n"
+            "If refinement comes out worse than the network alone, the network output is kept."
         )
+        self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         pr.addWidget(self.mode_combo)
         pr.addWidget(QLabel("HIO:"))
         self.hio_spin = QSpinBox()
@@ -2829,12 +2902,12 @@ class T5(QWidget):
         inp = self.input_path.text().strip()
         model = self.model_path.text().strip()
         model2 = self.model_path2.text().strip()
-        mode = self.mode_combo.currentText()
+        mode = self.mode_combo.currentData()
 
         if not inp or not os.path.exists(inp):
             QMessageBox.warning(self, "Error", "Select a valid input file")
             return
-        if not model or not os.path.exists(model):
+        if mode != 'classical' and (not model or not os.path.exists(model)):
             QMessageBox.warning(self, "Error", "Select a valid AutoPhaseNet checkpoint")
             return
         if mode in ('ensemble', 'ensemble+refine'):
@@ -2849,7 +2922,7 @@ class T5(QWidget):
             'input_path': inp,
             'model_path': model,
             'model_path2': model2 if model2 else None,
-            'mode': self.mode_combo.currentText(),
+            'mode': mode,
             'n_raar': self.raar_spin.value(),
             'n_er': self.er_spin.value(),
             'n_hio': self.hio_spin.value(),
@@ -2867,6 +2940,11 @@ class T5(QWidget):
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+
+    def _mode_changed(self):
+        # the classical algorithms need no checkpoint at all
+        nn = self.mode_combo.currentData() != 'classical'
+        self.model_path.setEnabled(nn); self.model_path2.setEnabled(nn)
 
     def _on_done(self, result):
         self._result = result
@@ -3214,6 +3292,16 @@ class T6(QWidget):
         self.update_btn.clicked.connect(self._render_now)
         cv.addWidget(self.update_btn)
 
+        self.auto_update_check = QCheckBox("Auto-update view")
+        self.auto_update_check.setToolTip(
+            "Re-render as soon as any setting below changes, instead of waiting for\n"
+            "'Update view'. There is a short pause after the last change so dragging a\n"
+            "slider does not start a render on every step.\n"
+            "Turn this off at Maximum quality, where a render takes a while."
+        )
+        self.auto_update_check.toggled.connect(self._queue_auto)
+        cv.addWidget(self.auto_update_check)
+
         # Display mode
         mg = QGroupBox("Display mode (what to color)")
         mv = QVBoxLayout(mg)
@@ -3245,6 +3333,19 @@ class T6(QWidget):
             "• Surface only: same but draws the boundary voxels only (faster)"
         )
         rgv.addWidget(self.render_combo)
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems([q[0] for q in VIEW_QUALITY])
+        self.quality_combo.setCurrentIndex(1)
+        self.quality_combo.setToolTip(
+            "How much detail to draw. Higher settings keep more voxels and smooth the\n"
+            "isosurface less, so density and strain stay distinguishable \u2014 at the cost\n"
+            "of render time.\n\n"
+            + "\n".join(f"\u2022 {q[0]}: up to {q[1]:,} points ({q[2]:,} inside the shell)"
+                        for q in VIEW_QUALITY)
+            + "\n\nSet this before clicking 'View Reconstruction'."
+        )
+        rgv.addWidget(QLabel("Render quality:"))
+        rgv.addWidget(self.quality_combo)
         cv.addWidget(rg)
 
         # Export to ParaView (.vti)
@@ -3320,7 +3421,8 @@ class T6(QWidget):
         cg = QGroupBox("Colormap")
         cv2 = QVBoxLayout(cg)
         self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems(["twilight", "hot", "inferno", "viridis", "jet", "coolwarm", "plasma"])
+        self.cmap_combo.addItems(["turbo", "twilight", "hot", "inferno", "viridis", "jet",
+                                  "coolwarm", "plasma", "magma", "cividis"])
         self.cmap_combo.setToolTip(
             "Color scheme. 'twilight' is best for phase\n"
             "(diverging through zero); 'hot'/'inferno' for amplitude;\n"
@@ -3491,6 +3593,20 @@ class T6(QWidget):
         self.canvas3d.mpl_connect('button_press_event', self._on_3d_press)
         self.canvas3d.mpl_connect('button_release_event', self._on_3d_release)
         self.canvas3d.mpl_connect('motion_notify_event', self._on_3d_motion)
+
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setInterval(450)
+        self._auto_timer.timeout.connect(self._auto_fire)
+        for _n, _sig in [('mode_combo', 'currentIndexChanged'), ('render_combo', 'currentIndexChanged'),
+                         ('quality_combo', 'currentIndexChanged'), ('cmap_combo', 'currentIndexChanged'),
+                         ('thresh_slider', 'valueChanged'), ('size_slider', 'valueChanged'),
+                         ('opacity_slider', 'valueChanged'), ('auto_scale_check', 'toggled'),
+                         ('vmin_spin', 'valueChanged'), ('vmax_spin', 'valueChanged'),
+                         ('clip_check', 'toggled'), ('clip_axis_combo', 'currentIndexChanged'),
+                         ('clip_dir_combo', 'currentIndexChanged'), ('clip_slider', 'valueChanged')]:
+            _w = getattr(self, _n, None)
+            if _w is not None: getattr(_w, _sig).connect(self._queue_auto)
 
         # Initial blank view with helpful message
         self._show_message(
@@ -3687,6 +3803,14 @@ class T6(QWidget):
             color='#3fb950'
         )
 
+    def _queue_auto(self, *a):
+        if self.auto_update_check.isChecked() and self._result is not None:
+            self._auto_timer.start()
+
+    def _auto_fire(self):
+        if self.auto_update_check.isChecked() and self._result is not None:
+            self._render_now()
+
     def _render_now(self):
         """Render the 3D view with current settings."""
         if self._result is None:
@@ -3717,6 +3841,8 @@ class T6(QWidget):
         r = self._result
         mode_idx = self.mode_combo.currentIndex()
         render_idx = self.render_combo.currentIndex()  # 0=points, 1=isosurface, 2=surface only
+        _q = VIEW_QUALITY[max(0, min(self.quality_combo.currentIndex(), len(VIEW_QUALITY) - 1))]
+        q_pts, q_int, sig_iso, sig_surf = _q[1], _q[2], _q[3], _q[4]
         threshold = self.thresh_slider.value() / 100.0
         opacity = self.opacity_slider.value() / 100.0
         cmap = self.cmap_combo.currentText()
@@ -3843,10 +3969,7 @@ class T6(QWidget):
                 #   - Surface only: less smoothing → preserves mesh detail
                 amp_max = max(float(amp.max()), 1e-12)
                 iso_value = threshold * amp_max
-                if render_idx == 1:    # Isosurface: smoother
-                    amp_smooth = gaussian_filter(amp, sigma=1.5)
-                else:                  # Surface only: less smooth
-                    amp_smooth = gaussian_filter(amp, sigma=0.4)
+                amp_smooth = gaussian_filter(amp, sigma=sig_iso if render_idx == 1 else sig_surf)
 
                 if amp_smooth.max() < iso_value:
                     raise DataQualityError(
@@ -4016,7 +4139,7 @@ class T6(QWidget):
                     if deep_mask.sum() > 30:
                         deep_coords = np.argwhere(deep_mask)
                         # Sub-sample to keep the plot responsive
-                        max_internal = 4000
+                        max_internal = q_int
                         if len(deep_coords) > max_internal:
                             sub_idx = np.random.default_rng(0).choice(
                                 len(deep_coords), max_internal, replace=False
@@ -4097,7 +4220,7 @@ class T6(QWidget):
                     if len(coords) == 0:
                         raise DataQualityError("No voxels remain after clip plane.")
 
-                max_pts = 15000
+                max_pts = q_pts
                 if len(coords) > max_pts:
                     idx = np.random.default_rng(0).choice(len(coords), max_pts, replace=False)
                     coords = coords[idx]

@@ -343,16 +343,25 @@ class ReflectionCalculator:
         P=self.config.POLARIZATION_FACTOR;tt=2.*tr;return(P*np.cos(tt)**2+(1.-P))/(np.sin(tr)**2*np.cos(tr)+1e-12)
     def _fk(self,hkl,ops):
         eq=set()
-        for op in ops: he=tuple(int(round(x)) for x in op.rotation_matrix@hkl);eq.add(he);eq.add(tuple(-x for x in he))
+        for m in ops: he=tuple(int(round(x)) for x in m@hkl);eq.add(he);eq.add(tuple(-x for x in he))
         return frozenset(eq)
     def calculate(self):
-        c=self.config;lam=c.wavelength_angstrom;eV=c.BEAM_ENERGY_KEV*1e3;mh=c.HKL_MAX_SEARCH;rows=[]
-        try: sga=SpacegroupAnalyzer(self.builder.get_pmg_structure());ops=sga.get_symmetry_operations()
+        c=self.config;lam=c.wavelength_angstrom;eV=c.BEAM_ENERGY_KEV*1e3;rows=[]
+        qm=min(c.Q_MAX_INV_ANG,4.*np.pi*np.sin(np.radians(c.TWO_THETA_MAX/2.))/lam)
+        # h_i = G.a_i/2pi, so |h_i| <= qm*|a_i|/2pi is exact. One limit per axis: a
+        # single number loses every high-l reflection when c is long (hexagonal).
+        lim=[max(int(np.floor(qm*x/(2.*np.pi))),c.HKL_MAX_SEARCH) for x in np.linalg.norm(c.lattice_vectors_cartesian,axis=1)]
+        try:
+            # Miller indices are covariant: a symmetry op acts as R^-T, not R. In
+            # fractional axes R is not orthogonal for hexagonal cells, so R@hkl
+            # merges inequivalent reflections and the unique filter then drops them.
+            sga=SpacegroupAnalyzer(self.builder.get_pmg_structure())
+            ops=[np.linalg.inv(o.rotation_matrix).T for o in sga.get_symmetry_operations()]
         except: ops=None
         seen=set()
-        for h in range(-mh,mh+1):
-            for k in range(-mh,mh+1):
-                for l in range(-mh,mh+1):
+        for h in range(-lim[0],lim[0]+1):
+            for k in range(-lim[1],lim[1]+1):
+                for l in range(-lim[2],lim[2]+1):
                     if h==k==l==0: continue
                     d=self._d(h,k,l)
                     if d is None or d<=0: continue
@@ -368,22 +377,16 @@ class ReflectionCalculator:
                     if ops is not None:
                         fk=self._fk(np.array([h,k,l]),ops);iu=fk not in seen
                         if iu: seen.add(fk)
-                    else: iu=(h>=0)and(h>=k)and(k>=l)and(l>=0)
+                    else: fk=frozenset({(h,k,l),(-h,-k,-l)});iu=(h>=0)and(h>=k)and(k>=l)and(l>=0)
                     rows.append({'hkl':(h,k,l),'hkl_str':f'({h} {k} {l})','d_Ang':round(d,4),'2theta':round(tt,4),'theta_B':round(tt/2.,4),'q_Ang':round(q,4),'|F|':round(Fa,3),'F_sq':round(F2,2),'LP':round(LP,4),'unique':iu,
-                                 '_d':d,'_tt':tt,'_q':q,'_F2':F2,'_LP':LP})
+                                 '_d':d,'_tt':tt,'_q':q,'_F2':F2,'_LP':LP,'_cls':fk})
         df=pd.DataFrame(rows).sort_values('q_Ang').reset_index(drop=True)
         df=df[df['unique']].copy().reset_index(drop=True)
         df['I_rel']=df['F_sq']*df['LP'];mx=df['I_rel'].max() if len(df) else 1.
         df['I_norm']=(df['I_rel']/mx) if mx>0 else 0.;df=df.sort_values('I_norm',ascending=False).reset_index(drop=True);df['BCDI_flag']=df['I_norm']>=0.3
-        def _can(t):
-            h,k,l=t;n=(-h,-k,-l);s1=sum(t);s2=sum(n)
-            if s2>s1: return n
-            if s1>s2: return t
-            p1=sum(1 for x in t if x>0);p2=sum(1 for x in n if x>0)
-            if p2>p1: return n
-            if p1>p2: return t
-            return t if t>n else n
-        df['hkl_canonical']=df['hkl'].apply(_can);df['hkl_display']=df['hkl_canonical'].apply(lambda t:f'({t[0]} {t[1]} {t[2]})')
+        # label each family by its tidiest member: fewest negative indices, then largest
+        def _can(f): return min(f,key=lambda t:(sum(1 for x in t if x<0),-t[0],-t[1],-t[2]))
+        df['hkl_canonical']=df['_cls'].apply(_can);df['hkl_display']=df['hkl_canonical'].apply(lambda t:f'({t[0]} {t[1]} {t[2]})')
         self.reflections_df=df;return df
     def select_reflection(self,hkl=None):
         if self.reflections_df is None: self.calculate()
@@ -398,6 +401,8 @@ class ReflectionCalculator:
                 for th,tk,tl in[(h,k,l),(-h,-k,-l)]:
                     ts=f'({th} {tk} {tl})';m=df[df['hkl_display']==ts]
                     if len(m): break
+            if len(m)==0:
+                t=(int(h),int(k),int(l));m=df[df['_cls'].apply(lambda f:t in f)]
             if len(m)==0: raise ValueError(f'Reflection ({h} {k} {l}) not found')
             sel=m.iloc[0]
         # full-precision values; the rounded columns are for display only
@@ -499,7 +504,8 @@ class BCDISimulator:
         if progress_cb: progress_cb(95)
         self.diff_volume=diff.astype(np.float32);self.q_grids={'qx':qx,'qy':qy,'qz':qz}
         xh,xv,xl=self._coh();self.coherence={'xi_h_A':xh,'xi_v_A':xv,'xi_l_A':xl}
-        if progress_cb: progress_cb(100);return diff,self.q_grids
+        if progress_cb: progress_cb(100)
+        return diff,self.q_grids
 
 def add_experimental_noise(vol,n_photons=None,photon_mode='total',poisson=True,air_scatter=0,
                            readout_noise=0,dark_cps=0,exposure_s=1.,dead_pixels_frac=0,

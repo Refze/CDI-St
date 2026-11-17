@@ -58,6 +58,14 @@ class _Sci(QLineEdit):
         except ValueError: return 0.0
     def setValue(self,v): self.setText(f'{float(v):g}')
 
+def _fit(w,frac=.92,mw=1000,mh=640):
+    # a fixed 1500x960 with a 1200x800 minimum does not fit a 1366x768 laptop:
+    # the window ends up larger than the screen and the controls get crushed
+    g=(w.screen() or QApplication.primaryScreen()).availableGeometry()
+    w.setMinimumSize(min(mw,g.width()),min(mh,g.height()))
+    w.resize(min(max(mw,int(g.width()*frac)),g.width()),min(max(mh,int(g.height()*frac)),g.height()))
+    w.move(g.x()+(g.width()-w.width())//2,g.y()+(g.height()-w.height())//2)
+
 def _nb():
     b=QPushButton("next >>");b.setEnabled(False);b.setFixedSize(QSize(80,28));b.setStyleSheet("background:#238636;font-size:9pt;padding:4px 10px;min-height:20px;font-weight:700");return b
 
@@ -277,7 +285,10 @@ class T2(QWidget):
         # Coherence
         cb=QGroupBox("Coherence");cf=QFormLayout(cb);cf.setLabelAlignment(Qt.AlignmentFlag.AlignRight);cf.setVerticalSpacing(3)
         self.sh=_dbl(0,10000,300,1," um");self.sv=_dbl(0,10000,10,1," um");self.sd=_dbl(.1,500,50,1," m");self.bw=_dbl(1e-6,.1,1e-4,6);self.bw.setDecimals(6)
-        cf.addRow("Src H:",self.sh);cf.addRow("Src V:",self.sv);cf.addRow("Src D:",self.sd);cf.addRow("dE/E:",self.bw);lc.addWidget(cb);lc.addStretch();mh.addLayout(lc)
+        cf.addRow("Src H:",self.sh);cf.addRow("Src V:",self.sv);cf.addRow("Src D:",self.sd);cf.addRow("dE/E:",self.bw);lc.addWidget(cb);lc.addStretch()
+        lw=QWidget();lw.setLayout(lc);sa=QScrollArea();sa.setWidgetResizable(True);sa.setWidget(lw)
+        sa.setMinimumWidth(340);sa.setMaximumWidth(430);sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        mh.addWidget(sa)
         # Center: reflection chart
         cc=QVBoxLayout();cc.setSpacing(4);cc.addWidget(QLabel("Reflection intensities"))
         with matplotlib.rc_context(MPL_DARK): self.rf=Figure(figsize=(4,5),tight_layout=True);self.rc_=FigureCanvas(self.rf)
@@ -565,9 +576,9 @@ def _make_reports_button(parent):
 
 class MW_Sim(QMainWindow):
     def __init__(self):
-        super().__init__();self.setWindowTitle("BCDI Simulation");self.resize(1500,960);self.setMinimumSize(1200,800)
+        super().__init__();self.setWindowTitle("BCDI Simulation");_fit(self)
         self.tabs=QTabWidget();self.tabs.setDocumentMode(True);self.t1=T1();self.t2=T2();self.t3=T3()
-        self.tabs.addTab(self.t1," 1 Material ");self.tabs.addTab(self.t2," 2 Beam ");self.tabs.addTab(self.t3," 3 Results ")
+        self.tabs.addTab(self.t1,"Material");self.tabs.addTab(self.t2,"Beam");self.tabs.addTab(self.t3,"Results")
         self.tabs.setTabEnabled(1,False);self.tabs.setTabEnabled(2,False);self.setCentralWidget(self.tabs)
         sb=QStatusBar();self.setStatusBar(sb);sb.showMessage("Build lattice first.")
         self.t1.built.connect(self._ob);self.t1.nb.clicked.connect(lambda:self.tabs.setCurrentIndex(1))
@@ -587,7 +598,7 @@ class MW_Sim(QMainWindow):
 
 class MW_Analysis(QMainWindow):
     def __init__(self,parent=None):
-        super().__init__(parent);self.setWindowTitle("BCDI Data Analysis");self.resize(1500,960);self.setMinimumSize(1200,800)
+        super().__init__(parent);self.setWindowTitle("BCDI Data Analysis");_fit(self)
         if not _HAS_NN:
             QMessageBox.critical(self,"Missing module",
                 "The data analysis module (nn_gui_tabs) is not available. "
