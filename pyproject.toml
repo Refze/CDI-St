@@ -24,7 +24,7 @@ keywords = [
     "ID01",
 ]
 classifiers = [
-    "Development Status :: 3 - Beta",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Scientific/Engineering :: Image Processing",
