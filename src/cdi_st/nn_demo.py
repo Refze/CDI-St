@@ -237,7 +237,7 @@ def main():
     t_total = time.time()
 
     print("\n" + "═" * 60)
-    print("  BCDI NN-Accelerated Phase Retrieval — Full Demo")
+    print("  BCDI NN-Accelerated Phase Retrieval: Full Demo")
     print("═" * 60)
     print(f"  Samples:    {args.num_samples}")
     print(f"  Grid:       {args.grid_size}³")

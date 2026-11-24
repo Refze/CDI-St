@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cdi-stools"
-version = "0.3.3"
-description = "Coherent Diffraction Imaging Simulation Tools — BCDI simulation and NN-based phase retrieval"
+version = "0.3.4"
+description = "Coherent Diffraction Imaging Simulation Tools: BCDI simulation and NN-based phase retrieval"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -24,7 +24,7 @@ keywords = [
     "ID01",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 3 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Scientific/Engineering :: Image Processing",
@@ -108,11 +108,11 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-# Pragmatic linting — most existing code already breaks heavy strict mode
+# Pragmatic linting: most existing code already breaks heavy strict mode
 select = ["E", "F", "W", "I", "UP"]
 ignore = [
-    "E501",   # line too long — many scientific lines exceed 100
-    "E402",   # module-level import not at top — common with conditional Qt imports
+    "E501",   # line too long: many scientific lines exceed 100
+    "E402",   # module-level import not at top: common with conditional Qt imports
     "E731",   # don't assign a lambda
 ]
 

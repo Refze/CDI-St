@@ -4,7 +4,6 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-# ── Import from your existing bcdi_core ──────────────────────────────────────
 from .bcdi_core import (
     MATERIAL_PRESETS, BCDIConfig, CrystalBuilder, ReflectionCalculator,
     BCDISimulator, DislocationConfig, add_experimental_noise,
@@ -85,10 +84,11 @@ def generate_single_sample(
     shape = random_shape(material, rng)
     cfg.PARTICLE_SHAPE = shape
     cfg.SUPERCELL_MULT = random_supercell(rng)
-    # DETECTOR_N_PIXELS is a derived @property = max(NX, NY) — set the
-    # underlying settable attributes instead.
+    # the FFT grid is SIM_GRID_MAX (DETECTOR_N_PIXELS returns it); NX/NY are only
+    # the panel size, so setting them alone left every sample at 192^3
     cfg.DETECTOR_NX = grid_size
     cfg.DETECTOR_NY = grid_size
+    cfg.SIM_GRID_MAX = grid_size
 
     strain_type, strain_mag = random_strain(rng)
     if not randomize_strain:
@@ -247,7 +247,7 @@ def generate_dataset(
                 continue
 
             # Save compressed
-            # Real-space voxel pitch (nm) — needed by reconstruction GUI
+            # Real-space voxel pitch (nm): needed by reconstruction GUI
             # voxel pitch = (object size × oversampling) / grid_size
             psize_arr = np.asarray(cfg.particle_size_nm, dtype=np.float32)
             voxel_size_nm = (psize_arr * float(cfg.TARGET_OVERSAMPLING)

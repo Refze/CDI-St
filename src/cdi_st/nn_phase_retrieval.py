@@ -5,7 +5,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from .nn_phase_model import PhaseUNet3D
+from .nn_phase_model import CDI_NN
 
 
 
@@ -109,7 +109,7 @@ def _shrink_wrap(obj, support, threshold=0.10, sigma=2.0, max_support_fraction=0
     n_voxels = new_support.sum()
     max_voxels = max_support_fraction * new_support.size
     if n_voxels > max_voxels:
-        # Too many voxels — keep only the brightest fraction
+        # Too many voxels: keep only the brightest fraction
         # by raising the effective threshold
         flat = blurred.flatten()
         # Find threshold value that keeps exactly max_voxels
@@ -160,7 +160,7 @@ def run_phase_retrieval(
             support = (auto_corr >= t).astype(np.float32)
     support = support.astype(np.float32)
 
-    # ── Initialize complex object — preserve NN amplitude if available ───
+    # ── Initialize complex object: preserve NN amplitude if available ───
     if initial_phase is None:
         initial_phase = rng.uniform(-np.pi, np.pi, (N, N, N)).astype(np.float32)
 
@@ -290,7 +290,7 @@ class HybridPhaseRetriever:
 
     def _load_model(self, path: str, base_channels: int):
         """Load trained U-Net from checkpoint."""
-        self.model = PhaseUNet3D(in_channels=1, base_channels=base_channels)
+        self.model = CDI_NN(in_channels=1, base_channels=base_channels)
         ckpt = torch.load(path, map_location='cpu', weights_only=False)
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.model.to(self.device)

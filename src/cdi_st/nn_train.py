@@ -8,7 +8,7 @@ from torch.amp import GradScaler, autocast
 from pathlib import Path
 
 from .nn_dataset import BCDIDataset, create_dataloaders
-from .nn_phase_model import PhaseUNet3D, BCDIPhaseLoss, count_parameters
+from .nn_phase_model import CDI_NN, BCDIPhaseLoss, count_parameters
 
 
 def train_one_epoch(
@@ -124,7 +124,7 @@ def train(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print(f"\n{'='*60}")
-    print(f"BCDI Phase U-Net Training")
+    print(f"CDI_NN Training")
     print(f"{'='*60}")
     print(f"  Device:       {device}")
     if device.type == 'cuda':
@@ -146,7 +146,7 @@ def train(
     )
 
     # Model
-    model = PhaseUNet3D(in_channels=1, base_channels=base_channels).to(device)
+    model = CDI_NN(in_channels=1, base_channels=base_channels).to(device)
     n_params = count_parameters(model)
     print(f"  Parameters:   {n_params:,}")
 

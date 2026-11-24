@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 try:
-    import hdf5plugin  # noqa: F401  — registers LZ4/bitshuffle/zstd filters
+    import hdf5plugin  # noqa: F401  registers LZ4/bitshuffle/zstd filters
     _HDF5_PLUGINS_AVAILABLE = True
     _HDF5_PLUGINS_VERSION = getattr(hdf5plugin, 'version', 'unknown')
 except ImportError:
@@ -14,15 +14,32 @@ except ImportError:
 
 # Filter IDs that REQUIRE hdf5plugin (h5py can't read them on its own)
 _PLUGIN_FILTER_IDS = {
-    32000: "LZF (32000) — actually built into h5py, but check",
+    32000: "LZF (32000), actually built into h5py, but check",
     32001: "Blosc (32001)",
     32004: "LZ4 (32004)",
-    32008: "Bitshuffle + LZ4 (32008) — Eiger detector default",
+    32008: "Bitshuffle + LZ4 (32008), the EIGER detector default",
     32015: "Zstandard (32015)",
     32016: "FCIDECOMP (32016)",
 }
-# Filters built into h5py / HDF5 — don't need hdf5plugin:
+# Filters built into h5py / HDF5: don't need hdf5plugin:
 _BUILTIN_FILTER_IDS = {0, 1, 2, 4, 32000}   # uncompressed, deflate, shuffle, szip, lzf
+
+
+def _counts(a):
+    # integer detectors mark gap, dead and saturated pixels with the dtype maximum
+    # (EIGER 32-bit: 4294967295), PILATUS with negative values. Once cast to float
+    # those look like counts, so they are zeroed here while the dtype is known.
+    # Float data carries no such flags: a simulated peak can exceed 1e12, so only
+    # NaN and inf are removed.
+    a = np.asarray(a)
+    f = a.astype(np.float32)
+    if a.dtype.kind in 'ui':
+        bad = a == np.iinfo(a.dtype).max
+        if a.dtype.kind == 'i': bad |= a < 0
+        f[bad] = 0
+    elif a.dtype.kind == 'f':
+        f[~np.isfinite(f)] = 0
+    return f
 
 
 def _dataset_requires_plugin(dataset) -> Optional[str]:
@@ -57,12 +74,12 @@ def _is_compression_plugin_error(err: Exception) -> bool:
 
 # Common paths where BCDI diffraction volumes live in different beamline formats
 KNOWN_PATHS = [
-    # ID01 / BLISS — most common for ESRF users
+    # ID01 / BLISS: most common for ESRF users
     '/entry_0000/measurement/merlin/data',
     '/entry_0000/measurement/eiger2M/data',
     '/entry_0000/measurement/mpx1x4/data',
     '/entry_0000/measurement/maxipix/data',
-    # P10 / PETRA III (DESY) — NeXus-style
+    # P10 / PETRA III (DESY): NeXus-style
     '/entry/data/data',
     '/entry/instrument/detector/data',
     '/entry/instrument/eiger_4m/data',
@@ -184,7 +201,7 @@ def diagnose_vds(dataset, dataset_path: str) -> str:
         return "\n".join(lines)
 
     if not sources:
-        lines.append("  But it reports no VDS sources — file may be corrupted.")
+        lines.append("  But it reports no VDS sources; the file may be corrupted.")
         return "\n".join(lines)
 
     lines.append(f"  VDS references {len(sources)} source file(s):")
@@ -270,7 +287,7 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
         if max_frames is not None and ds_arr.shape[0] > max_frames:
             start = (ds_arr.shape[0] - max_frames) // 2
             ds_arr = ds_arr[start:start + max_frames]
-        return np.asarray(ds_arr, dtype=np.float32)
+        return _counts(ds_arr)
     except (OSError, IOError, RuntimeError) as e:
         bulk_err = str(e)
         # Triage the error:
@@ -288,7 +305,7 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
                     f"This is normal for Eiger / Lambda / Pilatus detector data."
                 ) from e
             if filter_desc is not None and _HDF5_PLUGINS_AVAILABLE:
-                # hdf5plugin IS installed but the filter still failed —
+                # hdf5plugin IS installed but the filter still failed -
                 # uncommon edge case (older hdf5plugin missing this filter)
                 raise IOError(
                     f"Dataset '{dpath}' uses {filter_desc} compression and\n"
@@ -299,7 +316,7 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
                 ) from e
         # 2. If it's a VDS source issue, fall through to the VDS recovery
         if "open directory" not in bulk_err and "external" not in bulk_err.lower():
-            # Not VDS, not plugin — re-raise as-is
+            # Not VDS, not plugin: re-raise as-is
             raise
 
     # Step 3: VDS read failed at runtime -> diagnose
@@ -319,7 +336,7 @@ def _read_dataset_safely(ds, dpath: str, max_frames: int = None,
                 frame = ds[i, 0] if ds.shape[1] == 1 else ds[i]
             else:
                 frame = ds[i]
-            salvaged.append(np.asarray(frame, dtype=np.float32))
+            salvaged.append(_counts(frame))
         except (OSError, IOError, RuntimeError):
             skipped += 1
             continue
@@ -674,10 +691,10 @@ def load_p10_from_external_links(
             f"the rocking-curve maximum (~{memory_budget_gb:.0f} GB)."
         )
         if (y1 - y0) * (x1 - x0) == h0 * w0:
-            # Full detector — also suggest an ROI
+            # Full detector: also suggest an ROI
             suggestion += (
                 f"\nFor BCDI you typically only need a small ROI around the "
-                f"Bragg peak — e.g., detector_roi=(<peak_y>-128, <peak_y>+128, "
+                f"Bragg peak, e.g. detector_roi=(<peak_y>-128, <peak_y>+128, "
                 f"<peak_x>-128, <peak_x>+128)."
             )
         raise MemoryError(
@@ -717,7 +734,7 @@ def load_p10_from_external_links(
                 else:
                     arr = ds[local_start:local_stop, y0:y1, x0:x1]
                 n_read = arr.shape[0]
-                out[cursor:cursor + n_read] = arr.astype(np.float32, copy=False)
+                out[cursor:cursor + n_read] = _counts(arr)
                 cursor += n_read
                 n_ok += 1
         except Exception as e:
@@ -765,7 +782,7 @@ def find_diffraction_dataset(h5_file):
             if p in h5_file:
                 obj = h5_file[p]
                 if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 3:
-                    # Skip broken VDS — prefer next candidate
+                    # Skip broken VDS: prefer next candidate
                     if _vds_is_readable(obj):
                         return p, obj
         except (KeyError, OSError):
@@ -833,7 +850,7 @@ def resolve_dataset_path(h5_file, user_path: str):
     if isinstance(obj, h5py.Dataset):
         if len(obj.shape) < 2:
             raise ValueError(
-                f"'{user_path}' is a {len(obj.shape)}D dataset — need at "
+                f"'{user_path}' is a {len(obj.shape)}D dataset; need at "
                 f"least 2D detector frames (or 3D scan stack)."
             )
         return user_path, obj
@@ -855,7 +872,7 @@ def resolve_dataset_path(h5_file, user_path: str):
             if isinstance(child, h5py.Dataset) and len(child.shape) >= 3:
                 full = (user_path.rstrip('/') + '/' + k)
                 return full, child
-        # Third: walk deeper — maybe two levels under user's group
+        # Third: walk deeper: maybe two levels under user's group
         for k in obj.keys():
             try:
                 sub = obj[k]
@@ -871,7 +888,7 @@ def resolve_dataset_path(h5_file, user_path: str):
                         full = f"{user_path.rstrip('/')}/{k}/{k2}"
                         return full, ds
 
-        # Nothing found inside the group — list what IS there to help the user
+        # Nothing found inside the group: list what IS there to help the user
         children = []
         for k in obj.keys():
             try:
@@ -955,7 +972,7 @@ def mask_detector_gaps(volume: np.ndarray,
     # Implementation: iterate only over the gap voxels (they're a small fraction
     # of the data, ~2% for Maxipix), and for each one sample a neighborhood
     # in the same rocking frame.
-    half_window = 9   # 19×19 window — wide enough to bridge a 6-pixel gap
+    half_window = 9   # 19×19 window: wide enough to bridge a 6-pixel gap
     for z in range(Nz):
         gap_z = gap_mask[z]
         if not gap_z.any():
@@ -981,7 +998,7 @@ def mask_detector_gaps(volume: np.ndarray,
 
 def remove_hot_pixels(volume: np.ndarray, threshold_sigma: float = 50.0) -> np.ndarray:
     from scipy.ndimage import median_filter
-    # 3D median filter — more robust against the peak itself
+    # 3D median filter: more robust against the peak itself
     local_median = median_filter(volume, size=3)
     # Only clip pixels that are >100× their immediate neighbors AND
     # not part of an extended bright structure
@@ -1002,7 +1019,7 @@ def find_bragg_peak_box(volume: np.ndarray,
 
     peak_max = float(smoothed.max())
     if peak_max <= 0:
-        # Empty volume — fall back to center coordinates (NOT slices).
+        # Empty volume: fall back to center coordinates (NOT slices).
         # The caller expects (cz, cy, cx) as integers, and crop_around_peak
         # later subtracts half from these. Returning slices here caused a
         # "unsupported operand type 'slice' and 'int'" error downstream.
@@ -1069,7 +1086,7 @@ def remove_beamstop_streaks(volume: np.ndarray) -> np.ndarray:
 
     n_streaks = int(streak_mask_2d.sum())
     if n_streaks == 0 or n_streaks > out.shape[1] * out.shape[2] * 0.05:
-        # Either no streaks, or "too many" — safety: don't risk killing signal
+        # Either no streaks, or "too many": safety: don't risk killing signal
         return out
 
     # Zero the streak pixels across all rocking frames
@@ -1118,7 +1135,7 @@ def load_h5_diffraction(
                 f"Could not open {path}: this file uses a Virtual Dataset "
                 f"(VDS) that links to other files in the same directory.\n\n"
                 f"  - If you have a '_master.h5' file next to this one, open "
-                f"that one instead — CDI-ST will auto-find the data chunks.\n"
+                f"that one instead; CDI-ST will auto-find the data chunks.\n"
                 f"  - If files are missing from the directory, restore them or "
                 f"copy ALL related files (master + data_NNNNNN) together.\n\n"
                 f"Original HDF5 error: {msg}"
@@ -1128,7 +1145,7 @@ def load_h5_diffraction(
     try:
         # Find the dataset
         if dataset_path is not None:
-            # User provided an explicit path — but they might have given a
+            # User provided an explicit path: but they might have given a
             # Group rather than a Dataset (the common confusion with NeXus
             # files where '/entry/data' is a Group containing the actual
             # 'data' Dataset). resolve_dataset_path handles both.
@@ -1353,7 +1370,7 @@ def read_spec_scan(spec_path: str, scan_number: int) -> dict:
         # IMPORTANT: modern silx (>=0.5) returns data with shape
         # (nlines, ncolumns). To get the column for label i, we need
         # data[:, i], NOT data[i]. Using data[i] gives one measurement
-        # point's row of values across all columns — completely
+        # point's row of values across all columns: completely
         # misaligned with the label list.
         # Use scan.data_column_by_name() when available (robust); fall
         # back to direct indexing with shape detection.
@@ -1446,7 +1463,7 @@ def read_edf_stack(edf_template: str, frame_numbers: list,
         f = edf_template % int(frame)
         try:
             e = xu.io.EDFFile(f)
-            volume[idx] = e.data.astype(np.float32)
+            volume[idx] = _counts(e.data)
             n_loaded += 1
         except Exception as ex:
             if len(failed_examples) < 3:
@@ -1514,7 +1531,7 @@ def load_spec_edf_scan(
     n_existing = int(keep_mask.sum())
     n_missing = int((~keep_mask).sum())
     if n_existing == 0:
-        # No file exists for ANY frame — almost certainly a wrong template
+        # No file exists for ANY frame: almost certainly a wrong template
         # or wrong directory. Surface a clear error before read_edf_stack
         # tries (and fails to) read 401 nonexistent files.
         first_few = ", ".join(str(int(fr)) for fr in frame_numbers[:5])
@@ -1618,7 +1635,7 @@ def load_spec_edf_scan(
         #   sample circles: y- (eta), z- (phi)
         #   detector circles: z- (nu), y- (delta)
         #   primary beam: [1, 0, 0]
-        # Detector calibration (defaults — user can override if needed):
+        # Detector calibration (defaults: user can override if needed):
         beam_energy_eV = 13000.0
         cch1, cch2 = 207.11, 167.86  # detector center pixels
         chpdeg = [406.3, 406.3]      # channels per degree
@@ -1655,7 +1672,7 @@ def load_spec_edf_scan(
             print(f"  Voxel pitch: ({vn[0]:.3f}, {vn[1]:.3f}, {vn[2]:.3f}) nm")
     except ImportError:
         if verbose:
-            print("  xrayutilities not installed — q-space conversion skipped.")
+            print("  xrayutilities not installed, q-space conversion skipped.")
             print("  Install with: pip install xrayutilities")
     except Exception as e:
         if verbose:
@@ -1729,7 +1746,7 @@ def _find_chunk_internal_data_path(h5_file, hint_path: str = None) -> Optional[s
             candidates.sort(reverse=True)
             return candidates[0][1]
 
-    # Last resort — full tree walk
+    # Last resort: full tree walk
     fallback = None
     fallback_size = 0
     def _walk(g, prefix=""):
@@ -1834,7 +1851,7 @@ def load_p10_chunks_directly(
                 with h5py.File(c, 'r') as f:
                     ds = f[p]
                     # Before reading, check if this chunk needs hdf5plugin
-                    # and we don't have it — bail out IMMEDIATELY rather than
+                    # and we don't have it: bail out IMMEDIATELY rather than
                     # spam 381 identical errors
                     if not _HDF5_PLUGINS_AVAILABLE:
                         needs = _dataset_requires_plugin(ds)
@@ -1845,7 +1862,7 @@ def load_p10_chunks_directly(
                     arr = ds[...]
                     if len(arr.shape) == 2:
                         arr = arr[None, :, :]
-                    salvaged_volumes.append(arr.astype(np.float32))
+                    salvaged_volumes.append(_counts(arr))
             except Exception as e:
                 # Detect compression-plugin error at read time too
                 if _is_compression_plugin_error(e) and not _HDF5_PLUGINS_AVAILABLE:
@@ -1853,7 +1870,7 @@ def load_p10_chunks_directly(
                     plugin_error_filter = _dataset_requires_plugin(
                         h5py.File(c, 'r')[p]
                     ) if True else "compression filter"
-                    # Try to read the filter info — but fall back gracefully
+                    # Try to read the filter info: but fall back gracefully
                     try:
                         with h5py.File(c, 'r') as f:
                             plugin_error_filter = (_dataset_requires_plugin(f[p])
@@ -1887,7 +1904,7 @@ def load_p10_chunks_directly(
         try:
             volume = np.concatenate(salvaged_volumes, axis=0)
         except ValueError as e:
-            # Shapes don't match — pad to common size or fail loudly
+            # Shapes don't match: pad to common size or fail loudly
             shapes = [v.shape for v in salvaged_volumes]
             raise IOError(
                 f"Chunk shapes are inconsistent: {shapes}\n"
@@ -1916,7 +1933,7 @@ def load_p10_chunks_directly(
                         f"dataset. Use 'Inspect HDF5 structure' to see what's "
                         f"inside."
                     )
-                volume = np.asarray(f[p][...], dtype=np.float32)
+                volume = _counts(f[p][...])
                 if verbose:
                     print(f"  Loaded CXI data from '{p}': shape={volume.shape}")
         else:
@@ -1938,7 +1955,7 @@ def load_p10_chunks_directly(
 
 def _preprocess_p10_volume(raw_volume: np.ndarray, target_size: int = 64,
                             verbose: bool = True) -> np.ndarray:
-    volume = np.maximum(raw_volume.astype(np.float32), 0)
+    volume = np.maximum(_counts(raw_volume), 0)
     if verbose:
         print(f"  Raw volume:    shape={volume.shape}  "
               f"min={volume.min():.2e} max={volume.max():.2e}")
@@ -1998,7 +2015,7 @@ def p10_h5_to_npz(
     external_link_error = None
 
     # ── Strategy 0: detect if this is an Eiger/P10 MASTER with external links.
-    # If so, this is by far the most reliable read path — bypasses h5py's
+    # If so, this is by far the most reliable read path: bypasses h5py's
     # link-following entirely by opening chunk files directly.
     # When external links exist, we ALWAYS prefer this strategy because
     # the master's link-following mechanism can fail silently (returning
@@ -2018,13 +2035,13 @@ def p10_h5_to_npz(
                         has_external_links = True
                         if verbose:
                             print(f"  Detected {len([L for L in links if L['link_type']=='external'])} "
-                                  f"external link(s) in '{grp_path}' — this is an Eiger/P10 master file.")
+                                  f"external link(s) in '{grp_path}': this is an Eiger/P10 master file.")
                         break
         except Exception:
             pass
 
     if has_external_links:
-        # External links exist — try resolving them. The FIRST group we
+        # External links exist: try resolving them. The FIRST group we
         # detected with external links is the right one; only try alternatives
         # if that one specifically returned "No external links found".
         first_ext_error = None
@@ -2044,11 +2061,11 @@ def p10_h5_to_npz(
                 )
                 break
             except MemoryError:
-                # Re-raise memory errors — user needs to subset their range
+                # Re-raise memory errors: user needs to subset their range
                 raise
             except IOError as inner:
                 # If the failure was "no external links here", keep trying other
-                # group paths. If the failure was "chunks missing" — surface
+                # group paths. If the failure was "chunks missing": surface
                 # that immediately, it's the actionable error.
                 msg = str(inner)
                 if "No external links found" in msg:
@@ -2056,7 +2073,7 @@ def p10_h5_to_npz(
                         first_ext_error = inner
                     continue
                 else:
-                    # Real error (chunks missing, unreadable, etc) — surface it
+                    # Real error (chunks missing, unreadable, etc): surface it
                     external_link_error = inner
                     break
         else:
@@ -2082,7 +2099,7 @@ def p10_h5_to_npz(
         try:
             # IMPORTANT: do NOT pass the user's dataset_path to the chunk
             # reader if it's a VDS-like path (e.g. '/entry/data/data_000002').
-            # The fallback is meant to bypass VDS entirely — so we read
+            # The fallback is meant to bypass VDS entirely: so we read
             # each chunk's OWN data at the canonical chunk-internal location.
             import re
             user_path_is_vds_like = (dataset_path is not None and
@@ -2090,7 +2107,7 @@ def p10_h5_to_npz(
             if user_path_is_vds_like:
                 chunk_path = "/entry/data/data"
                 if verbose:
-                    print(f"  Note: '{dataset_path}' is a VDS/external-link path — "
+                    print(f"  Note: '{dataset_path}' is a VDS/external-link path; "
                           f"chunk fallback will read '/entry/data/data' "
                           f"from each chunk instead.")
             else:
@@ -2121,7 +2138,7 @@ def p10_h5_to_npz(
                 "Possible solutions:\n"
                 "  - Make sure ALL `<scan>_data_NNNNNN.h5` chunk files are\n"
                 "    in the SAME directory as the master file\n"
-                "  - Use 'Inspect HDF5 structure' to see what's inside —\n"
+                "  - Use 'Inspect HDF5 structure' to see what's inside;\n"
                 "    look for entries marked '→ external link to ...'\n"
                 "  - For Eiger master files, the data chunks must be on disk\n"
                 "  - Try opening a single chunk file directly"

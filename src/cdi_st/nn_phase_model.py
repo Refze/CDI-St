@@ -46,7 +46,7 @@ class UpBlock(nn.Module):
         return self.conv(x)
 
 
-class PhaseUNet3D(nn.Module):
+class CDI_NN(nn.Module):
 
     def __init__(
         self,
@@ -195,7 +195,7 @@ def model_summary(model: nn.Module, grid_size: int = 64):
     """Print model architecture summary."""
     n_params = count_parameters(model)
     print(f"\n{'='*50}")
-    print(f"PhaseUNet3D Summary")
+    print(f"CDI_NN Summary")
     print(f"{'='*50}")
     print(f"  Parameters:     {n_params:,}")
     print(f"  Grid size:      {grid_size}³")
@@ -212,7 +212,7 @@ def model_summary(model: nn.Module, grid_size: int = 64):
 
 if __name__ == '__main__':
     # Test model creation and forward pass
-    model = PhaseUNet3D(in_channels=1, base_channels=32)
+    model = CDI_NN(in_channels=1, base_channels=32)
     model_summary(model, grid_size=64)
 
     # Test forward pass

@@ -103,7 +103,7 @@ def fig_overview(recon: dict, save_path: str = None):
     N = recon['phase'].shape[0]; c = N // 2
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    fig.suptitle('Reconstructed Crystal (Real Space — Central Slice)',
+    fig.suptitle('Reconstructed Crystal (Real Space, Central Slice)',
                  fontsize=13, y=1.02)
 
     im0 = axes[0].imshow(recon['amplitude'][:, :, c], cmap='hot',
@@ -232,7 +232,7 @@ def fig_phase_comparison(recon: dict, truth: dict, save_path: str = None):
     if meta.get('strain_type', 'none') == 'none' \
        and meta.get('dislocation_type', 'none') == 'none':
         fig.text(0.5, 0.01,
-                 '⚠ This sample has no strain and no dislocation — ground truth phase is constant. '
+                 '⚠ This sample has no strain and no dislocation; ground truth phase is constant. '
                  'Try a strained sample for a meaningful test.',
                  ha='center', fontsize=10, color='#f0883e', style='italic')
 
@@ -266,7 +266,7 @@ def fig_convergence(recon: dict, save_path: str = None):
 
     if errors.max() > 1.0:
         ax.annotate(
-            'RAAR lets intensity leak outside\nsupport — normal with β=0.87',
+            'RAAR lets intensity leak outside\nsupport, normal with β=0.87',
             xy=(raar_end * 0.7, errors.max() * 0.7),
             xytext=(raar_end * 0.25, errors.max() * 0.25),
             fontsize=9, color='#888',
@@ -320,7 +320,7 @@ def main():
         print("[4/4] Phase comparison (real space)...")
         fig_phase_comparison(recon, truth, sp('4_phase.png'))
     else:
-        print("[3/4] (skipped — no --ground_truth provided)")
+        print("[3/4] (skipped: no --ground_truth provided)")
 
     print("\nDone.")
 

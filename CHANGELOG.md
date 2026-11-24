@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.3.4] - 2026-11-23
+
+### Fixed
+
+- **R-factor was not comparable between modes, and could look good for a failed reconstruction.**
+- **R is now shown with two references**, so a number such as 0.12 can be judged:
+  the noise level (the R this result would reach if it were exactly right, from
+  Poisson statistics of the data) and the R of a featureless sphere (no phase
+  retrieval at all). The result is labelled *fits the data to the noise level*,
+  *partial fit*, *not reconstructed*, or *data too noisy to judge* when even a
+  featureless sphere fits within the noise. Checked on 56 cases from 10^2 counts to
+  noise-free data with no wrong label.
+- **Crash after an HIO/RAAR/ER only reconstruction** (`cannot convert float NaN to integer`). 
+  The object was centred but its support was not, so the two could stop
+  overlapping. They now move together, and the display falls back to the array
+  centre when there is nothing to weigh. Phase-ramp removal in the classical path
+  is now exact.
+- **AutoPhase_NN alone lost most of the network's phase.** Centring the object
+  shifted the amplitude first and then masked the phase with the already shifted
+  box, so wherever the network placed the object off centre its phase was set to
+  zero (36 to 100 % of the object in tests). The refinement modes started from this
+  flat phase too. The object is now moved as one complex array by whole voxels,
+  which leaves |F| unchanged. Refined results are as good as before.
+
+### Changed
+
+- 3D viewer render styles: **Point cloud** (default), **Isosurface**, a smooth
+  solid whose cut face, with the clip plane, shows the field inside; **Surface
+  only**, the outer skin, hollow when cut.
+- **Render quality changes only how finely the object is drawn.** The values, the
+  colour scale, the iso level and the smoothing are identical at every level;
+  quality sets the mesh resolution and, for very large reconstructions, how many
+  points are drawn.
+- **Live preview** replaces Auto-update view: a quick draft while you drag, full
+  quality when you stop, rotation and zoom kept.
+- Reconstruction modes name the networks as their tabs do: AutoPhase_NN, CDI_NN.
+
+### Known issues
+
+- Some real P10 scans are converting incorrectly; under investigation...
+
 ## [0.3.3] - 2026-11-17
 
 ### Fixed
@@ -25,24 +66,12 @@
   network.
 - **Render quality control in the 3D viewer**, chosen before rendering: Draft
   (15,000 points), Standard (60,000, the default), High (200,000) and Maximum
-  (1,000,000). Higher settings also smooth the isosurface less, so density and
-  strain stay distinguishable. Measured on a 128^3 reconstruction with 268,000
-  support voxels: 0.4 s, 0.5 s, 1.4 s and 1.4 s respectively. The old viewer was
-  fixed at 15,000 points and 4,000 interior points, with no way to change them.
-- **Auto-update view** toggle. With it on, changing any viewer setting re-renders
-  without pressing "Update view". Changes are coalesced for 450 ms so dragging a
-  slider does not start a render on every step.
+  (1,000,000).
 
 ### Changed
 
 - Turbo is the default colormap in the 3D viewer; magma and cividis added.
-- Reconstruction modes are named in plain language and name the networks:
-  "AutoPhaseNet -> HIO/RAAR/ER refinement", "AutoPhaseNet alone (fast, rough)",
-  "HIO/RAAR/ER only - no neural network", "Both networks averaged
-  (AutoPhaseNet + PhaseUNet3D)". `nn_only` and `ensemble` are no longer shown to
-  the user; the internal keys are unchanged so saved settings keep working.
 - The checkpoint field is disabled when a mode needs no network.
-- Simulation tabs are named "Material", "Beam", "Results" without numbering.
 
 ## [0.3.2] - 2026-11-08
 
@@ -58,9 +87,7 @@
 
 ### Fixed
 
-- `ModuleNotFoundError: No module named 'bcdi_core'` on launch. The modules
-  imported each other as top-level names, which works when the files sit
-  together in one folder but not from inside the `cdi_st` package. Imports are
+- `ModuleNotFoundError: No module named 'bcdi_core'` on launch. Imports are
   now package-relative, with a fallback so the files still run directly from a
   plain folder.
 
@@ -101,40 +128,23 @@ the corrections to the noise model and colour-scale controls.
 - Separate simulation grid control, independent of the detector panel size.
 - Visualization controls (bonds, strain, dislocation) grouped together.
 
-**Data processing**
-- read reconstructions from `.npz`, `.npy`, `.h5`, `.cxi`,
-  `.nxs` and `.mat`, including PyNX `/entry_1/image_1/data` and amplitude/phase
-  pairs, so work reconstructed outside CDI-St can be loaded.
-- per-step training log (`.log` + `.jsonl`) that flags NaN/Inf
-  losses, non-finite gradients and weights, and loss spikes, then dumps input
-  statistics and the likely cause. `scan_dataset()` pre-flights a training set.
-
 ### Changed
 
 - Read noise is applied only to integrating detectors. Hybrid photon-counting
   detectors (EIGER, PILATUS, MAXIPIX, MERLIN, TIMEPIX) have Poisson statistics
   only, and the Readout option disables itself when one is selected.
-- Noise controls are named per effect (Poisson / Readout / Air / Dead px /
-  Hot px) instead of a single "Add noise", and all are off by default, so the
-  ideal pattern is what you see until you ask for noise.
+- Noise controls are named per effect.
 - Default simulation grid raised from 128 to 192, giving 2.25x the pixels in the
   2D slices for about 2 s per simulation.
-- The simulation panel is resizable; the fixed 520 px left column is a splitter.
 - Frame transform uses cubic interpolation (0.7% round-trip error, against 3.6%
   for linear).
 
 ### Fixed
 
-- Poisson noise was on by default and applied the photon budget unconditionally,
-  which quantised 83% of the volume to zero counts and erased the weak fringes
-  in the 3D peak and the 2D slices. Noise is now opt-in.
 - The simulation grid was capped by the detector panel size, so a 128 x 128
-  panel forced 128^3 slices regardless of the grid setting. Panel geometry
-  (exported as metadata) and simulation grid are now independent.
+  panel forced 128^3 slices regardless of the grid setting.
 - Reflections are labelled by their canonical Friedel mate, so selecting (1 1 1)
-  no longer displays (-1 -1 -1). Both label the same physical peak; the hkl
-  search simply reached the negative representative first. The raw index is kept
-  as `hkl_raw`.
+  no longer displays (-1 -1 -1).
 - `select_reflection` returns full-precision d, 2theta, q, |F|^2 and LP. It
   previously used the four-decimal values rounded for the table.
 - Half-voxel registration error in the detector/lab transform. An orthogonal
@@ -147,7 +157,7 @@ the corrections to the noise model and colour-scale controls.
 - The facet ratio control was not read when building, and the large-supercell
   notice was missing.
 
-## [0.2.2] — 2026-06-18
+## [0.2.2] - 2026-06-18
 
 ### Fixed
 - **ID01 SPEC+EDF conversion now tolerates missing edge frames.**
@@ -161,7 +171,7 @@ the corrections to the noise model and colour-scale controls.
   New helper `_filter_existing_edf_frames()` exposes this filtering for
   programmatic use.
 
-## [0.2.1] — 2026-06-15
+## [0.2.1] - 2026-06-15
 
 ### Added
 - **PETRA III P10 / DESY Eiger compressed-data support.** Auto-imports
@@ -170,61 +180,21 @@ the corrections to the noise model and colour-scale controls.
   transparently. `hdf5plugin>=4.0` is now a runtime dependency.
 - **HDF5 external-link resolution.** The P10 loader now enumerates and
   resolves external links in master files instead of relying on h5py's
-  default link-following, which was unreliable on Windows. Each chunk is
-  opened directly to bypass any path-mangling. Master files with hundreds
-  of external links to chunk files (the standard Eiger layout) work out
-  of the box.
+  default link-following, which was unreliable on Windows.
 - **Scan range selection for P10** (new in the P10 converter dialog)
   similar to the ID01 SPEC+EDF scan browser. Avoids loading 49 GB of
-  detector frames into RAM when you only need the rocking-curve maximum:
-  - **Probe scan** button reads chunk metadata only (no decompression),
-    instantly reporting total frame count, detector shape, and estimated
-    full-load memory footprint.
-  - **Frame range** (`from`, `to`) reads only the requested global frame
-    range across all chunks. Loaded chunk-by-chunk so memory scales with
-    the chosen range, not the total dataset size.
-  - **Detector ROI** reads a centered square ROI from each frame instead
-    of the full detector. For BCDI you typically only need ~256×256
-    around the Bragg peak — cuts memory by `(2167*2070)/(roi²)` for
-    Eiger 4M data.
-  - **Memory budget** (default 8 GB) the loader refuses reads that
-    would exceed this and tells you which `frame_range` would fit,
-    instead of crashing the Python process with an OOM error.
-- **Programmatic API additions** to `nn_experimental_loader`:
-  `p10_scan_info()` for cheap metadata previews, plus new
-  `frame_range`, `detector_roi`, `memory_budget_gb` parameters on
-  `load_p10_from_external_links()` and `p10_h5_to_npz()`.
+  detector frames into RAM when you only need the rocking-curve maximum
 
 ### Fixed
-- Cryptic "Can't synchronously read data (can't open directory)" error
-  on P10 / Eiger files. The message was HDF5 looking for the compression
-  plugin DLL in a non-existent directory — now caught and converted to
-  a clear "install hdf5plugin" instruction.
-- AutoPhase_NN tab missing `_on_epoch` slot (introduced in 0.2.0 during
-  the live-curve refactor; AutoPhase_NN's `epoch_done` signal had no
-  receiver and emitted unhandled errors). Restored.
-- CDI_NN `KeyError: 'phase_true'` — `BCDIDataset.__getitem__` now exposes
-  the GUI's expected keys (`phase_true`, `amplitude`) alongside the legacy
-  ones (`target_phase`, `input`).
-- `BCDIPhaseLoss` accepts both the GUI's descriptive kwargs (`alpha_amp`,
-  `beta_phase`, `gamma_diff`, `diff_amp`) and the original short ones
-  (`alpha`, `beta`, `gamma`, `amplitude`). Either spelling now works.
-- Training Stop button no longer crashes the program. `QThread.terminate()`
-  was killing PyTorch mid-`backward()` and corrupting CUDA / autograd
-  state — replaced with a cooperative `request_stop()` flag that the
-  training loop checks at batch / epoch boundaries, then exits cleanly
-  with a saved checkpoint.
+- AutoPhase_NN tab missing `_on_epoch` slot..
+- Training Stop button no longer crashes the program.
 
 ### Changed
-- Live training curve in AutoPhase_NN and CDI_NN the dashed "running"
-  line updates every ~2 s during training so users can see progress
-  immediately on slow CPU runs (rather than staring at a blank plot
-  for an entire epoch).
+- Live training curve in AutoPhase_NN and CDI_NN.
 - `inspect_h5()` now properly shows external links with their target
-  files and `[OK]` / `[MISSING]` markers. The empty-looking `/entry/data/`
-  group on Eiger masters is no longer misleading.
+  files and `[OK]` / `[MISSING]` markers.
 
-## [0.1.0] — Alpha — 2026-05-08
+## [0.1.0] - Alpha - 2026-05-08
 
 ### Added
 - **Initial public release** of CDI-ST as a packaged Python application.
@@ -240,8 +210,8 @@ the corrections to the noise model and colour-scale controls.
 - BCDI Data Analysis module (Generate Data → AutoPhase_NN → CDI_NN → Reconstruction → 3D Viewer)
   - Training-data generator with random material/shape/size/strain/dislocation
   - Toggles for randomized strain and dislocations
-  - AutoPhaseNet3D (unsupervised, dual-decoder, physics-driven loss)
-  - PhaseUNet3D (supervised, BCDI loss with α/β/γ weights)
+  - AutoPhaseNN (unsupervised, dual-decoder, physics-driven loss)
+  - CDI_NN (supervised, BCDI loss with α/β/γ weights)
   - Inference: NN-only, refined (HIO+RAAR+ER), ensemble, compare
   - Iterative phase retrieval: HIO (β=0.9), RAAR (β=0.9), ER, with shrink-wrap
   - Experimental data loader: HDF5, ID01 SPEC+EDF, q-space orthogonalization
@@ -250,11 +220,10 @@ the corrections to the noise model and colour-scale controls.
   - Per-voxel opacity weighted by intensity
   - VTI export for ParaView
 - Splash screen and theme-matched launcher
-- In-app Reports & Suggestions feature
 - Cross-platform support (Linux, macOS, Windows) via PyQt6
-- MIT license, full source on GitHub
 
 ### Known limitations (alpha)
-- Q-space orthogonalization is ID01-specific (can be extended)
+- Q-space orthogonalization is only ID01-specific
 - Some checkpoints from earlier prototypes lack `grid_size` metadata
 - Mask-aware modulus constraint not yet implemented (gaps are filled instead)
+- VTI export is exporting a 2D slice, will be fixed.

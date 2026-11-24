@@ -1,12 +1,19 @@
 import sys,tempfile,os,time
+if not __package__ and os.path.basename(os.path.dirname(os.path.abspath(__file__)))=='cdi_st':
+    # started as a script from the source folder: load this folder as the cdi_st package,
+    # otherwise every "import cdi_st..." silently takes an older installed copy
+    _here=os.path.dirname(os.path.abspath(__file__))
+    for _m in [m for m in sys.modules if m=='cdi_st' or m.startswith('cdi_st.')]:
+        if not os.path.abspath(getattr(sys.modules[_m],'__file__','') or '').startswith(_here): del sys.modules[_m]
+    sys.path.insert(0,os.path.dirname(_here));__package__='cdi_st'
 import numpy as np
 from collections import Counter
-from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer,QRect
+from PyQt6.QtCore import Qt,QThread,pyqtSignal,QUrl,QSize,QTimer,QRect,QObject,QEvent
 from PyQt6.QtGui import QPalette,QColor,QFont,QPixmap,QPainter,QBrush,QPen
 from PyQt6.QtWidgets import (QApplication,QMainWindow,QWidget,QTabWidget,QVBoxLayout,QHBoxLayout,
     QFormLayout,QGridLayout,QGroupBox,QLabel,QPushButton,QComboBox,QSpinBox,QDoubleSpinBox,
     QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QProgressBar,QMessageBox,QStatusBar,
-    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog,QSplashScreen)
+    QSplitter,QPlainTextEdit,QFrame,QCheckBox,QScrollArea,QFileDialog,QSplashScreen,QAbstractSpinBox,QAbstractScrollArea,QSlider)
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView; _HAS_WEB=True
 except: _HAS_WEB=False
@@ -550,7 +557,7 @@ class ReportsDialog(QWidget):
                 cb=QApplication.clipboard();cb.setText(f"To: {self.RECIPIENT}\nFrom: {email}\n\n{msg}")
                 self.status.setText(
                     f"<span style='color:#f0883e'>Could not open mail client automatically. "
-                    f"The message has been copied to clipboard \u2014 please paste it into "
+                    f"The message has been copied to the clipboard; please paste it into "
                     f"an email to {self.RECIPIENT}.</span>"
                 )
             except Exception as e2:
@@ -748,7 +755,7 @@ class Launcher(QMainWindow):
         choose = QLabel("Choose a module:")
         choose.setStyleSheet("color:#e6edf3;font-size:10pt;background:transparent")
         v.addWidget(choose)
-        # Mode buttons (no tooltips — labels are self-explanatory)
+        # Mode buttons (no tooltips: labels are self-explanatory)
         sim_btn = QPushButton("BCDI Simulation")
         sim_btn.setStyleSheet(
             "background:#238636;color:#fff;padding:14px;border-radius:6px;"
@@ -823,8 +830,29 @@ class Launcher(QMainWindow):
 
 MW=MW_Sim
 
+class _NoWheel(QObject):
+    # the wheel scrolls the panel; it never changes a value in a box or slider
+    def eventFilter(self,o,e):
+        if e.type()==QEvent.Type.Wheel and isinstance(o,(QAbstractSpinBox,QComboBox,QSlider)):
+            p=o.parentWidget()
+            while p is not None and not isinstance(p,QAbstractScrollArea): p=p.parentWidget()
+            if p is not None:
+                sb=p.verticalScrollBar();sb.setValue(sb.value()-int(e.angleDelta().y()/120*3*sb.singleStep()))
+            return True
+        return False
+
+def _excepthook(t,v,tb):
+    # PyQt6 aborts the whole program on an exception inside a slot unless a hook
+    # is installed: report it and keep running instead
+    import traceback;txt=''.join(traceback.format_exception(t,v,tb));sys.__stderr__.write(txt)
+    try:
+        m=QMessageBox(QMessageBox.Icon.Critical,"CDI-ST error",f"{t.__name__}: {v}");m.setDetailedText(txt);m.exec()
+    except Exception: pass
+
 def main():
+    sys.excepthook=_excepthook
     app=QApplication(sys.argv);app.setStyle("Fusion");pal=QPalette()
+    app.installEventFilter(_NoWheel(app))
     for r,c in[(QPalette.ColorRole.Window,"#0d1117"),(QPalette.ColorRole.WindowText,"#e6edf3"),(QPalette.ColorRole.Base,"#0d1117"),(QPalette.ColorRole.AlternateBase,"#161b22"),(QPalette.ColorRole.Text,"#e6edf3"),(QPalette.ColorRole.Button,"#21262d"),(QPalette.ColorRole.ButtonText,"#e6edf3"),(QPalette.ColorRole.Highlight,"#1f6feb"),(QPalette.ColorRole.HighlightedText,"#ffffff")]:
         pal.setColor(r,QColor(c))
     app.setPalette(pal);app.setStyleSheet(QSS)
